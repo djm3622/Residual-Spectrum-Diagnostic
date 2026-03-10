@@ -47,6 +47,8 @@ def run_single_seed(
     eval_pair_index: int = 0,
     test_case_index: int = 0,
     test_step_index: int = 0,
+    trajectory_case_indices: List[int] | None = None,
+    trajectory_step_indices: List[int] | None = None,
     show_data_progress: bool = False,
     show_training_progress: bool = False,
     show_eval_progress: bool = False,
@@ -79,6 +81,33 @@ def run_single_seed(
         omega0 = solver.random_initial_condition(seed=seed * 1000 + 500 + idx)
         _, omega_true = solver.solve(omega0, config.t_final, config.n_snapshots)
         test_cases.append({"omega0": omega0, "omega_true": omega_true})
+
+    if trajectory_case_indices:
+        requested_cases = [int(idx) for idx in trajectory_case_indices]
+    else:
+        requested_cases = [0]
+    valid_trajectory_case_indices = sorted(
+        {
+            int(np.clip(idx, 0, len(test_cases) - 1))
+            for idx in requested_cases
+        }
+    )
+    if not valid_trajectory_case_indices:
+        valid_trajectory_case_indices = [0]
+    trajectory_case_set = set(valid_trajectory_case_indices)
+
+    if trajectory_step_indices:
+        requested_steps = [int(step) for step in trajectory_step_indices]
+    else:
+        requested_steps = [0, config.n_snapshots // 4, config.n_snapshots // 2, (3 * config.n_snapshots) // 4, config.n_snapshots - 1]
+    valid_trajectory_steps = sorted(
+        {
+            int(np.clip(step, 0, config.n_snapshots - 1))
+            for step in requested_steps
+        }
+    )
+    if not valid_trajectory_steps:
+        valid_trajectory_steps = [0, config.n_snapshots - 1]
 
     inputs = []
     targets_clean = []
@@ -137,14 +166,35 @@ def run_single_seed(
         "noisy_lfv": [],
     }
 
-    for case in progress_iter(
-        test_cases,
-        enabled=show_eval_progress,
-        desc="Evaluation",
-        total=len(test_cases),
+    trajectory_rows = []
+    for case_idx, case in enumerate(
+        progress_iter(
+            test_cases,
+            enabled=show_eval_progress,
+            desc="Evaluation",
+            total=len(test_cases),
+        )
     ):
         omega_clean = rollout_2d(model_clean, case["omega0"], config.n_snapshots)
         omega_noisy = rollout_2d(model_noisy, case["omega0"], config.n_snapshots)
+
+        if case_idx in trajectory_case_set:
+            trajectory_rows.append(
+                {
+                    "case_index": case_idx,
+                    "model": "clean",
+                    "omega_pred": omega_clean,
+                    "omega_true": case["omega_true"],
+                }
+            )
+            trajectory_rows.append(
+                {
+                    "case_index": case_idx,
+                    "model": "noisy",
+                    "omega_pred": omega_noisy,
+                    "omega_true": case["omega_true"],
+                }
+            )
 
         clean_stats = rsd.compute_metrics(omega_clean, case["omega_true"], dt)
         noisy_stats = rsd.compute_metrics(omega_noisy, case["omega_true"], dt)
@@ -192,6 +242,11 @@ def run_single_seed(
                 "eval_pair_index": eval_pair_index,
                 "test_case_index": test_case_index,
                 "test_step_index": test_step_index,
+            },
+            "trajectory": {
+                "case_indices": valid_trajectory_case_indices,
+                "step_indices": valid_trajectory_steps,
+                "rows": trajectory_rows,
             },
         },
         "_checkpoint_clean": model_clean.state_dict(),
@@ -263,6 +318,13 @@ def main() -> None:
     eval_pair_index = int(artifacts.get("eval_pair_index", 0))
     test_case_index = int(artifacts.get("test_case_index", 0))
     test_step_index = int(artifacts.get("test_step_index", 0))
+    trajectory_viz = artifacts.get("trajectory_visualization", {})
+    if isinstance(trajectory_viz, dict):
+        trajectory_case_indices = trajectory_viz.get("instance_indices", [0, 1])
+        trajectory_step_indices = trajectory_viz.get("step_indices", [0, 4, 8, 12, 16, 19])
+    else:
+        trajectory_case_indices = [0, 1]
+        trajectory_step_indices = [0, 4, 8, 12, 16, 19]
     progress = raw_config.get("progress", {})
     progress_enabled = bool(progress.get("enabled", False))
     data_progress = bool(progress.get("data_generation", progress_enabled))
@@ -279,6 +341,8 @@ def main() -> None:
         eval_pair_index=eval_pair_index,
         test_case_index=test_case_index,
         test_step_index=test_step_index,
+        trajectory_case_indices=trajectory_case_indices,
+        trajectory_step_indices=trajectory_step_indices,
         show_data_progress=data_progress,
         show_training_progress=training_progress,
         show_eval_progress=eval_progress,
@@ -373,6 +437,58 @@ def main() -> None:
             input_cmap=input_cmap,
             input_border_color=input_border_color,
             input_border_width=input_border_width,
+        )
+
+    if artifacts.get("save_trajectory_visualizations", True):
+        from utils.plotting import save_trajectory_error_rows, save_trajectory_field_rows
+
+        fit_dir = run_out_dir / "fit_quality"
+        trajectory_payload = viz_payload.get("trajectory", {})
+        rows = trajectory_payload.get("rows", [])
+        case_indices = trajectory_payload.get("case_indices", [])
+        step_indices = trajectory_payload.get("step_indices", [])
+
+        by_case: Dict[int, Dict[str, np.ndarray]] = {}
+        for row in rows:
+            case_idx = int(row["case_index"])
+            case_bucket = by_case.setdefault(case_idx, {})
+            case_bucket["omega_true"] = row["omega_true"]
+            case_bucket[f"omega_{row['model']}"] = row["omega_pred"]
+
+        ordered_cases = [int(idx) for idx in case_indices if int(idx) in by_case]
+        if not ordered_cases:
+            ordered_cases = sorted(by_case.keys())
+
+        field_rows = []
+        error_rows = []
+        for case_idx in ordered_cases:
+            bucket = by_case[case_idx]
+            omega_true = bucket.get("omega_true")
+            omega_clean = bucket.get("omega_clean")
+            omega_noisy = bucket.get("omega_noisy")
+            if omega_true is None or omega_clean is None or omega_noisy is None:
+                continue
+
+            field_rows.append({"label": f"case {case_idx} | Truth", "traj": omega_true})
+            field_rows.append({"label": f"case {case_idx} | Clean", "traj": omega_clean})
+            field_rows.append({"label": f"case {case_idx} | Noisy", "traj": omega_noisy})
+
+            error_rows.append({"label": f"case {case_idx} | Clean", "pred": omega_clean, "target": omega_true})
+            error_rows.append({"label": f"case {case_idx} | Noisy", "pred": omega_noisy, "target": omega_true})
+
+        save_trajectory_field_rows(
+            field_rows,
+            step_indices=step_indices,
+            output_path=fit_dir / "trajectory_omega_fields.png",
+            title="Trajectory snapshots | Vorticity (truth, clean, noisy)",
+            cmap="RdYlBu_r",
+        )
+        save_trajectory_error_rows(
+            error_rows,
+            step_indices=step_indices,
+            output_path=fit_dir / "trajectory_omega_error.png",
+            title="Trajectory absolute error snapshots | Vorticity",
+            cmap="magma",
         )
 
     print("Run complete")

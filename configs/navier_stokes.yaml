@@ -46,6 +46,7 @@ paths:
 artifacts:
   save_figures: true
   save_fit_visualizations: true
+  save_trajectory_visualizations: true
   fit_visualization:
     input:
       cmap: cividis
@@ -53,6 +54,9 @@ artifacts:
       border_width: 2.0
     output:
       cmap: RdBu_r
+  trajectory_visualization:
+    instance_indices: [0, 1]
+    step_indices: [0, 4, 8, 12, 16, 19]
   eval_pair_index: 0
   test_case_index: 0
   test_step_index: 0

@@ -33,7 +33,9 @@ python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml conv 7 --
 ## Method Argument
 
 Supported `method` values:
-- `conv` (aliases: `convolutional`, `spectral`)
+- `conv` (aliases: `convolutional`, `spectral`) -> learned one-step conv surrogate
+- `physics` (aliases: `gray_scott`, `grayscott`) -> explicit physics-only stepper
+- `conv_nn` (aliases: `conv_legacy`, `nn`) -> alias for the learned conv surrogate
 
 ## YAML Controls
 
@@ -43,6 +45,7 @@ Each YAML controls all run parameters, including:
 - time integration
 - train/test trajectory counts
 - training hyperparameters (`noise_level`, `lr`, `n_iter`, `batch_size`, `grad_clip`)
+- rollout-stability controls for RD (`training.rollout_horizon`, `training.rollout_weight`)
 - training objective (`training.loss`: `combined`, `l2`, `l1`, `spectral_decay`, `energy`)
 - progress bars (`progress.enabled`, `progress.data_generation`, `progress.training`, `progress.evaluation`)
 - RSD projection basis (`rsd.basis`: `fourier`, `laplace`, `wavelet`, `svd`) and band settings (`omega_1_frac`, `omega_2_frac`)

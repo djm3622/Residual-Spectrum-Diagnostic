@@ -21,15 +21,20 @@ time:
 data:
   n_train_trajectories: 16
   n_test_trajectories: 3
+  initial_condition: center_square
+  initial_square_size: 20
+  initial_noise_amplitude: 0.01
 
 training:
   device: mps
   loss: combined
   noise_level: 0.03
-  lr: 0.001
-  n_iter: 150
+  lr: 0.0007
+  n_iter: 300
   batch_size: 32
   grad_clip: 1.0
+  rollout_horizon: 4
+  rollout_weight: 0.7
 
 progress:
   enabled: true
@@ -49,6 +54,7 @@ paths:
 artifacts:
   save_figures: true
   save_fit_visualizations: true
+  save_trajectory_visualizations: true
   fit_visualization:
     input:
       cmap: cividis
@@ -56,6 +62,9 @@ artifacts:
       border_width: 2.0
     output:
       cmap: viridis
+  trajectory_visualization:
+    instance_indices: [0, 2]
+    step_indices: [0, 20, 40, 60, 80, 100, 120]
   eval_pair_index: 20
   test_case_index: 0
   test_step_index: 20

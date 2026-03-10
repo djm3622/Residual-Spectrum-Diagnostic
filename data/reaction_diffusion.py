@@ -31,12 +31,18 @@ class GrayScottConfig:
 
     n_train_trajectories: int = 5
     n_test_trajectories: int = 3
+    initial_condition: str = "random_seeds"
+    initial_n_seeds: int = 15
+    initial_square_size: int = 20
+    initial_noise_amplitude: float = 0.01
 
     noise_level: float = 0.03
     train_lr: float = 0.05
     train_iterations: int = 100
     train_batch_size: int = 32
     train_grad_clip: float = 1.0
+    train_rollout_horizon: int = 4
+    train_rollout_weight: float = 0.6
 
     omega_1_frac: float = 1 / 16
     omega_2_frac: float = 1 / 6
@@ -72,11 +78,17 @@ class GrayScottConfig:
             dt=float(time["dt"]),
             n_train_trajectories=int(data["n_train_trajectories"]),
             n_test_trajectories=int(data["n_test_trajectories"]),
+            initial_condition=str(data.get("initial_condition", "random_seeds")),
+            initial_n_seeds=int(data.get("initial_n_seeds", 15)),
+            initial_square_size=int(data.get("initial_square_size", 20)),
+            initial_noise_amplitude=float(data.get("initial_noise_amplitude", 0.01)),
             noise_level=float(training["noise_level"]),
             train_lr=float(training["lr"]),
             train_iterations=int(training["n_iter"]),
             train_batch_size=int(training.get("batch_size", 32)),
             train_grad_clip=float(training.get("grad_clip", 1.0)),
+            train_rollout_horizon=int(training.get("rollout_horizon", 4)),
+            train_rollout_weight=float(training.get("rollout_weight", 0.6)),
             omega_1_frac=float(rsd["omega_1_frac"]),
             omega_2_frac=float(rsd["omega_2_frac"]),
         )
@@ -196,8 +208,16 @@ class GrayScottSolver:
 
         return u, v
 
-    def initial_condition_center_square(self, size: int = 20) -> Tuple[np.ndarray, np.ndarray]:
+    def initial_condition_center_square(
+        self,
+        size: int = 20,
+        noise_amplitude: float = 0.01,
+        seed: Optional[int] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """Centered square perturbation initial condition."""
+        if seed is not None:
+            np.random.seed(seed)
+
         u = np.ones((self.nx, self.ny))
         v = np.zeros((self.nx, self.ny))
 
@@ -207,7 +227,9 @@ class GrayScottSolver:
         u[cx - half : cx + half, cy - half : cy + half] = 0.5
         v[cx - half : cx + half, cy - half : cy + half] = 0.25
 
-        u += np.random.uniform(-0.01, 0.01, (self.nx, self.ny))
-        v += np.random.uniform(-0.01, 0.01, (self.nx, self.ny))
+        amp = max(float(noise_amplitude), 0.0)
+        if amp > 0.0:
+            u += np.random.uniform(-amp, amp, (self.nx, self.ny))
+            v += np.random.uniform(-amp, amp, (self.nx, self.ny))
 
         return np.clip(u, 0, 1), np.clip(v, 0, 1)

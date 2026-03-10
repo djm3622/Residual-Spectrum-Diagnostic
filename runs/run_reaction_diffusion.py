@@ -37,6 +37,28 @@ def _safe_mean(values: List[float]) -> float:
     return float(np.mean(finite))
 
 
+def _sample_initial_condition(solver: GrayScottSolver, config: GrayScottConfig, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Draw one configured initial condition for Gray-Scott trajectories."""
+    mode = str(config.initial_condition).strip().lower().replace("-", "_")
+
+    if mode in {"random_seeds", "random", "seeds"}:
+        return solver.initial_condition_random_seeds(
+            n_seeds=max(1, int(config.initial_n_seeds)),
+            seed=seed,
+        )
+    if mode in {"center_square", "square", "center"}:
+        return solver.initial_condition_center_square(
+            size=max(2, int(config.initial_square_size)),
+            noise_amplitude=max(0.0, float(config.initial_noise_amplitude)),
+            seed=seed,
+        )
+
+    raise ValueError(
+        f"Unsupported data.initial_condition '{config.initial_condition}'. "
+        "Use one of: random_seeds, center_square."
+    )
+
+
 def run_single_seed(
     config: GrayScottConfig,
     method: str,
@@ -47,6 +69,8 @@ def run_single_seed(
     eval_pair_index: int = 0,
     test_case_index: int = 0,
     test_step_index: int = 0,
+    trajectory_case_indices: List[int] | None = None,
+    trajectory_step_indices: List[int] | None = None,
     show_data_progress: bool = False,
     show_training_progress: bool = False,
     show_eval_progress: bool = False,
@@ -64,7 +88,7 @@ def run_single_seed(
         desc="Data gen (train)",
         total=config.n_train_trajectories,
     ):
-        u0, v0 = solver.initial_condition_random_seeds(n_seeds=15, seed=seed * 1000 + idx)
+        u0, v0 = _sample_initial_condition(solver, config, seed=seed * 1000 + idx)
         t_save, u_traj, v_traj = solver.solve(u0, v0, config.t_final, config.n_snapshots)
         train_data.append({"u": u_traj, "v": v_traj})
     dt = float(t_save[1] - t_save[0])
@@ -76,9 +100,36 @@ def run_single_seed(
         desc="Data gen (test)",
         total=config.n_test_trajectories,
     ):
-        u0, v0 = solver.initial_condition_random_seeds(n_seeds=15, seed=seed * 1000 + 500 + idx)
+        u0, v0 = _sample_initial_condition(solver, config, seed=seed * 1000 + 500 + idx)
         _, u_true, v_true = solver.solve(u0, v0, config.t_final, config.n_snapshots)
         test_cases.append({"u0": u0, "v0": v0, "u_true": u_true, "v_true": v_true})
+
+    if trajectory_case_indices:
+        requested_cases = [int(idx) for idx in trajectory_case_indices]
+    else:
+        requested_cases = [0]
+    valid_trajectory_case_indices = sorted(
+        {
+            int(np.clip(idx, 0, len(test_cases) - 1))
+            for idx in requested_cases
+        }
+    )
+    if not valid_trajectory_case_indices:
+        valid_trajectory_case_indices = [0]
+    trajectory_case_set = set(valid_trajectory_case_indices)
+
+    if trajectory_step_indices:
+        requested_steps = [int(step) for step in trajectory_step_indices]
+    else:
+        requested_steps = [0, config.n_snapshots // 4, config.n_snapshots // 2, (3 * config.n_snapshots) // 4, config.n_snapshots - 1]
+    valid_trajectory_steps = sorted(
+        {
+            int(np.clip(step, 0, config.n_snapshots - 1))
+            for step in requested_steps
+        }
+    )
+    if not valid_trajectory_steps:
+        valid_trajectory_steps = [0, config.n_snapshots - 1]
 
     inputs_u: List[np.ndarray] = []
     inputs_v: List[np.ndarray] = []
@@ -114,8 +165,29 @@ def run_single_seed(
             targets_u_noisy.append(u_noisy)
             targets_v_noisy.append(v_noisy)
 
-    model_clean = build_model(method, config.nx, config.ny, seed=seed, device=device, loss=loss)
-    model_noisy = build_model(method, config.nx, config.ny, seed=seed + 10000, device=device, loss=loss)
+    train_trajectory_u = [np.asarray(data["u"], dtype=np.float32) for data in train_data]
+    train_trajectory_v = [np.asarray(data["v"], dtype=np.float32) for data in train_data]
+
+    model_clean = build_model(
+        method,
+        config.nx,
+        config.ny,
+        seed=seed,
+        device=device,
+        loss=loss,
+        config=config,
+        snapshot_dt=dt,
+    )
+    model_noisy = build_model(
+        method,
+        config.nx,
+        config.ny,
+        seed=seed + 10000,
+        device=device,
+        loss=loss,
+        config=config,
+        snapshot_dt=dt,
+    )
 
     model_clean.train(
         inputs_u,
@@ -126,6 +198,10 @@ def run_single_seed(
         n_iter=config.train_iterations,
         batch_size=config.train_batch_size,
         grad_clip=config.train_grad_clip,
+        trajectory_u=train_trajectory_u,
+        trajectory_v=train_trajectory_v,
+        rollout_horizon=config.train_rollout_horizon,
+        rollout_weight=config.train_rollout_weight,
         show_progress=show_training_progress,
         progress_desc="Training clean model",
     )
@@ -138,6 +214,10 @@ def run_single_seed(
         n_iter=config.train_iterations,
         batch_size=config.train_batch_size,
         grad_clip=config.train_grad_clip,
+        trajectory_u=train_trajectory_u,
+        trajectory_v=train_trajectory_v,
+        rollout_horizon=config.train_rollout_horizon,
+        rollout_weight=config.train_rollout_weight,
         show_progress=show_training_progress,
         progress_desc="Training noisy model",
     )
@@ -145,26 +225,59 @@ def run_single_seed(
     metrics = {
         "clean_l2": [],
         "noisy_l2": [],
+        "clean_l2_u": [],
+        "noisy_l2_u": [],
+        "clean_l2_v": [],
+        "noisy_l2_v": [],
         "clean_hfv": [],
         "noisy_hfv": [],
         "clean_lfv": [],
         "noisy_lfv": [],
     }
 
-    for case in progress_iter(
-        test_cases,
-        enabled=show_eval_progress,
-        desc="Evaluation",
-        total=len(test_cases),
+    trajectory_rows = []
+    for case_idx, case in enumerate(
+        progress_iter(
+            test_cases,
+            enabled=show_eval_progress,
+            desc="Evaluation",
+            total=len(test_cases),
+        )
     ):
         u_clean, v_clean = rollout_coupled(model_clean, case["u0"], case["v0"], config.n_snapshots)
         u_noisy, v_noisy = rollout_coupled(model_noisy, case["u0"], case["v0"], config.n_snapshots)
+
+        if case_idx in trajectory_case_set:
+            trajectory_rows.append(
+                {
+                    "case_index": case_idx,
+                    "model": "clean",
+                    "u_pred": u_clean,
+                    "v_pred": v_clean,
+                    "u_true": case["u_true"],
+                    "v_true": case["v_true"],
+                }
+            )
+            trajectory_rows.append(
+                {
+                    "case_index": case_idx,
+                    "model": "noisy",
+                    "u_pred": u_noisy,
+                    "v_pred": v_noisy,
+                    "u_true": case["u_true"],
+                    "v_true": case["v_true"],
+                }
+            )
 
         clean_stats = rsd.compute_metrics(u_clean, v_clean, case["u_true"], case["v_true"], dt)
         noisy_stats = rsd.compute_metrics(u_noisy, v_noisy, case["u_true"], case["v_true"], dt)
 
         metrics["clean_l2"].append(clean_stats["l2_error"])
         metrics["noisy_l2"].append(noisy_stats["l2_error"])
+        metrics["clean_l2_u"].append(clean_stats["l2_u"])
+        metrics["noisy_l2_u"].append(noisy_stats["l2_u"])
+        metrics["clean_l2_v"].append(clean_stats["l2_v"])
+        metrics["noisy_l2_v"].append(noisy_stats["l2_v"])
         metrics["clean_hfv"].append(clean_stats["hfv"])
         metrics["noisy_hfv"].append(noisy_stats["hfv"])
         metrics["clean_lfv"].append(clean_stats["lfv"])
@@ -219,6 +332,11 @@ def run_single_seed(
                 "test_case_index": test_case_index,
                 "test_step_index": test_step_index,
             },
+            "trajectory": {
+                "case_indices": valid_trajectory_case_indices,
+                "step_indices": valid_trajectory_steps,
+                "rows": trajectory_rows,
+            },
         },
         "_checkpoint_clean": model_clean.state_dict(),
         "_checkpoint_noisy": model_noisy.state_dict(),
@@ -231,7 +349,11 @@ def parse_args() -> argparse.Namespace:
         description="Run one Gray-Scott experiment with YAML config, method, and seed."
     )
     parser.add_argument("config_yaml", type=str, help="Path to YAML config file")
-    parser.add_argument("method", type=str, help="Model method (e.g., conv)")
+    parser.add_argument(
+        "method",
+        type=str,
+        help="Model method (conv=neural default, conv_nn=neural alias, physics=explicit Gray-Scott).",
+    )
     parser.add_argument("seed", type=int, help="Random seed number")
     parser.add_argument(
         "--device",
@@ -289,6 +411,13 @@ def main() -> None:
     eval_pair_index = int(artifacts.get("eval_pair_index", 0))
     test_case_index = int(artifacts.get("test_case_index", 0))
     test_step_index = int(artifacts.get("test_step_index", 0))
+    trajectory_viz = artifacts.get("trajectory_visualization", {})
+    if isinstance(trajectory_viz, dict):
+        trajectory_case_indices = trajectory_viz.get("instance_indices", [0, 1])
+        trajectory_step_indices = trajectory_viz.get("step_indices", [0, 20, 40, 60, 80, 100, 120])
+    else:
+        trajectory_case_indices = [0, 1]
+        trajectory_step_indices = [0, 20, 40, 60, 80, 100, 120]
     progress = raw_config.get("progress", {})
     progress_enabled = bool(progress.get("enabled", False))
     data_progress = bool(progress.get("data_generation", progress_enabled))
@@ -305,6 +434,8 @@ def main() -> None:
         eval_pair_index=eval_pair_index,
         test_case_index=test_case_index,
         test_step_index=test_step_index,
+        trajectory_case_indices=trajectory_case_indices,
+        trajectory_step_indices=trajectory_step_indices,
         show_data_progress=data_progress,
         show_training_progress=training_progress,
         show_eval_progress=eval_progress,
@@ -413,6 +544,84 @@ def main() -> None:
             input_border_width=input_border_width,
         )
 
+    if artifacts.get("save_trajectory_visualizations", True):
+        from utils.plotting import save_trajectory_error_rows, save_trajectory_field_rows
+
+        fit_dir = run_out_dir / "fit_quality"
+        trajectory_payload = viz_payload.get("trajectory", {})
+        rows = trajectory_payload.get("rows", [])
+        case_indices = trajectory_payload.get("case_indices", [])
+        step_indices = trajectory_payload.get("step_indices", [])
+
+        by_case: Dict[int, Dict[str, np.ndarray]] = {}
+        for row in rows:
+            case_idx = int(row["case_index"])
+            case_bucket = by_case.setdefault(case_idx, {})
+            case_bucket["u_true"] = row["u_true"]
+            case_bucket["v_true"] = row["v_true"]
+            case_bucket[f"u_{row['model']}"] = row["u_pred"]
+            case_bucket[f"v_{row['model']}"] = row["v_pred"]
+
+        ordered_cases = [int(idx) for idx in case_indices if int(idx) in by_case]
+        if not ordered_cases:
+            ordered_cases = sorted(by_case.keys())
+
+        u_field_rows = []
+        v_field_rows = []
+        u_rows = []
+        v_rows = []
+        for case_idx in ordered_cases:
+            bucket = by_case[case_idx]
+            u_true = bucket.get("u_true")
+            v_true = bucket.get("v_true")
+            u_clean = bucket.get("u_clean")
+            v_clean = bucket.get("v_clean")
+            u_noisy = bucket.get("u_noisy")
+            v_noisy = bucket.get("v_noisy")
+
+            if u_true is None or v_true is None or u_clean is None or v_clean is None or u_noisy is None or v_noisy is None:
+                continue
+
+            u_field_rows.append({"label": f"case {case_idx} | Truth", "traj": u_true})
+            u_field_rows.append({"label": f"case {case_idx} | Clean", "traj": u_clean})
+            u_field_rows.append({"label": f"case {case_idx} | Noisy", "traj": u_noisy})
+
+            v_field_rows.append({"label": f"case {case_idx} | Truth", "traj": v_true})
+            v_field_rows.append({"label": f"case {case_idx} | Clean", "traj": v_clean})
+            v_field_rows.append({"label": f"case {case_idx} | Noisy", "traj": v_noisy})
+
+            u_rows.append({"label": f"case {case_idx} | Clean", "pred": u_clean, "target": u_true})
+            u_rows.append({"label": f"case {case_idx} | Noisy", "pred": u_noisy, "target": u_true})
+            v_rows.append({"label": f"case {case_idx} | Clean", "pred": v_clean, "target": v_true})
+            v_rows.append({"label": f"case {case_idx} | Noisy", "pred": v_noisy, "target": v_true})
+
+        save_trajectory_field_rows(
+            u_field_rows,
+            step_indices=step_indices,
+            output_path=fit_dir / "trajectory_u_fields.png",
+            title="Trajectory snapshots | Species u (truth, clean, noisy)",
+            cmap="turbo",
+        )
+        save_trajectory_field_rows(
+            v_field_rows,
+            step_indices=step_indices,
+            output_path=fit_dir / "trajectory_v_fields.png",
+            title="Trajectory snapshots | Species v (truth, clean, noisy)",
+            cmap="turbo",
+        )
+
+        save_trajectory_error_rows(
+            u_rows,
+            step_indices=step_indices,
+            output_path=fit_dir / "trajectory_u_error.png",
+            title="Trajectory absolute error snapshots | Species u",
+        )
+        save_trajectory_error_rows(
+            v_rows,
+            step_indices=step_indices,
+            output_path=fit_dir / "trajectory_v_error.png",
+            title="Trajectory absolute error snapshots | Species v",
+        )
     print("Run complete")
     print(f"Device: requested={requested_device} resolved={resolved_device}")
     print(f"Loss: {requested_loss}")
