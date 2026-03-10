@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from models.losses import LOSS_CHOICES, ObjectiveLoss, normalize_loss_name
 from utils.torch_runtime import (
     build_adam_optimizer,
     build_grad_scaler,
@@ -102,12 +103,15 @@ class ConvolutionalSurrogate2D:
         ny: int,
         seed: int | None = None,
         device: str = "auto",
+        loss: str = "combined",
     ):
         self.nx = nx
         self.ny = ny
         self.device = resolve_torch_device(device)
         configure_torch_backend(self.device)
         self.grad_scaler = build_grad_scaler(self.device)
+        self.objective_loss = ObjectiveLoss(nx=nx, ny=ny, device=self.device, loss=loss)
+        self.loss_name = self.objective_loss.loss_name
 
         if seed is not None:
             torch.manual_seed(seed)
@@ -115,24 +119,6 @@ class ConvolutionalSurrogate2D:
 
         self.net = _NSNonlinearOneStepNet().to(self.device)
         self.net.eval()
-
-    def _spectral_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        pred_hat = torch.fft.rfft2(pred)
-        target_hat = torch.fft.rfft2(target)
-        return F.mse_loss(pred_hat.real, target_hat.real) + F.mse_loss(pred_hat.imag, target_hat.imag)
-
-    def _gradient_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        pred_dx = pred - torch.roll(pred, shifts=1, dims=-2)
-        pred_dy = pred - torch.roll(pred, shifts=1, dims=-1)
-        target_dx = target - torch.roll(target, shifts=1, dims=-2)
-        target_dy = target - torch.roll(target, shifts=1, dims=-1)
-        return F.mse_loss(pred_dx, target_dx) + F.mse_loss(pred_dy, target_dy)
-
-    def _combined_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        mse = F.mse_loss(pred, target)
-        spec = self._spectral_loss(pred, target)
-        grad = self._gradient_loss(pred, target)
-        return mse + 0.2 * spec + 0.1 * grad
 
     def forward(self, omega: np.ndarray) -> np.ndarray:
         inp = np.asarray(omega, dtype=np.float32)[np.newaxis, ...]
@@ -176,7 +162,7 @@ class ConvolutionalSurrogate2D:
 
                 with train_autocast(self.device):
                     pred = self.net(xb)
-                    loss = self._combined_loss(pred, yb)
+                    loss = self.objective_loss(pred, yb)
 
                 if not torch.isfinite(loss):
                     continue
@@ -222,12 +208,13 @@ def build_model(
     ny: int,
     seed: int,
     device: str = "auto",
+    loss: str = "combined",
 ) -> OneStepModel:
     """Factory for NS surrogate models selected by CLI method arg."""
     normalized = method.strip().lower()
 
     if normalized in {"conv", "convolutional", "spectral", "nonlinear"}:
-        return ConvolutionalSurrogate2D(nx, ny, seed=seed, device=device)
+        return ConvolutionalSurrogate2D(nx, ny, seed=seed, device=device, loss=loss)
 
     raise ValueError(
         f"Unsupported method '{method}'. Use one of: conv, convolutional, spectral, nonlinear"

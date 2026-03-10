@@ -21,12 +21,23 @@ def build_run_dirs(
     checkpoint_root: str | Path,
     problem_name: str,
     method: str,
+    loss: str,
+    basis: str,
     seed: int,
 ) -> Tuple[Path, Path]:
     """Create deterministic output/checkpoint directories for one run."""
-    out_dir = ensure_dir(Path(output_root) / problem_name / method / f"seed_{seed}")
-    ckpt_dir = ensure_dir(Path(checkpoint_root) / problem_name / method / f"seed_{seed}")
+    loss_tag = f"loss_{_slugify_tag(loss)}"
+    basis_tag = f"basis_{_slugify_tag(basis)}"
+    out_dir = ensure_dir(Path(output_root) / problem_name / method / loss_tag / basis_tag / f"seed_{seed}")
+    ckpt_dir = ensure_dir(Path(checkpoint_root) / problem_name / method / loss_tag / basis_tag / f"seed_{seed}")
     return out_dir, ckpt_dir
+
+
+def _slugify_tag(value: str) -> str:
+    """Normalize run metadata into safe directory-name components."""
+    normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in str(value).strip())
+    compact = "_".join(part for part in normalized.split("_") if part)
+    return compact or "default"
 
 
 def convert_numpy(obj: Any) -> Any:

@@ -24,6 +24,7 @@ data:
 
 training:
   device: mps
+  loss: combined
   noise_level: 0.03
   lr: 0.001
   n_iter: 150
@@ -37,6 +38,7 @@ progress:
   evaluation: true
 
 rsd:
+  basis: fourier
   omega_1_frac: 0.0625
   omega_2_frac: 0.1666666667
 

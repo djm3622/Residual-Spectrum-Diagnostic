@@ -2,7 +2,7 @@
 """Entry script for one Gray-Scott reaction-diffusion run.
 
 Usage:
-    python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml conv 1 --device auto
+    python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml conv 1 --device auto --loss combined --basis fourier
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.reaction_diffusion import GrayScottConfig, GrayScottSolver
-from models.reaction_diffusion import build_model, rollout_coupled
+from models.reaction_diffusion import LOSS_CHOICES, build_model, normalize_loss_name, rollout_coupled
 from utils.config import load_yaml_config
-from utils.diagnostics import ReactionDiffusionRSDAnalyzer
+from utils.diagnostics import BASIS_CHOICES, ReactionDiffusionRSDAnalyzer, normalize_basis_name
 from utils.io import build_run_dirs, save_checkpoint, save_json
 from utils.noise import add_hf_noise_coupled
 from utils.progress import progress_iter
@@ -42,6 +42,8 @@ def run_single_seed(
     method: str,
     seed: int,
     device: str = "auto",
+    loss: str = "combined",
+    basis: str = "fourier",
     eval_pair_index: int = 0,
     test_case_index: int = 0,
     test_step_index: int = 0,
@@ -53,7 +55,7 @@ def run_single_seed(
     np.random.seed(seed * 1000)
 
     solver = GrayScottSolver(config)
-    rsd = ReactionDiffusionRSDAnalyzer(config)
+    rsd = ReactionDiffusionRSDAnalyzer(config, basis=basis)
 
     train_data = []
     for idx in progress_iter(
@@ -112,8 +114,8 @@ def run_single_seed(
             targets_u_noisy.append(u_noisy)
             targets_v_noisy.append(v_noisy)
 
-    model_clean = build_model(method, config.nx, config.ny, seed=seed, device=device)
-    model_noisy = build_model(method, config.nx, config.ny, seed=seed + 10000, device=device)
+    model_clean = build_model(method, config.nx, config.ny, seed=seed, device=device, loss=loss)
+    model_noisy = build_model(method, config.nx, config.ny, seed=seed + 10000, device=device, loss=loss)
 
     model_clean.train(
         inputs_u,
@@ -238,6 +240,20 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Compute device: auto, cpu, cuda, or mps (defaults to training.device in YAML, else auto).",
     )
+    parser.add_argument(
+        "--loss",
+        type=str,
+        choices=LOSS_CHOICES,
+        default=None,
+        help="Training objective (defaults to training.loss in YAML, else combined).",
+    )
+    parser.add_argument(
+        "--basis",
+        type=str,
+        choices=BASIS_CHOICES,
+        default=None,
+        help="Residual projection basis for HFV/LFV (defaults to rsd.basis in YAML, else fourier).",
+    )
     return parser.parse_args()
 
 
@@ -253,12 +269,19 @@ def main() -> None:
 
     experiment = raw_config.get("experiment", {})
     experiment_name = experiment.get("name", "reaction_diffusion")
+    training = raw_config.get("training", {})
+    rsd_cfg = raw_config.get("rsd", {})
+    requested_device = args.device if args.device is not None else str(training.get("device", "auto"))
+    requested_loss = normalize_loss_name(args.loss if args.loss is not None else str(training.get("loss", "combined")))
+    requested_basis = normalize_basis_name(args.basis if args.basis is not None else str(rsd_cfg.get("basis", "fourier")))
 
     run_out_dir, run_ckpt_dir = build_run_dirs(
         output_root,
         checkpoint_root,
         problem_name=experiment_name,
         method=args.method,
+        loss=requested_loss,
+        basis=requested_basis,
         seed=args.seed,
     )
 
@@ -266,19 +289,19 @@ def main() -> None:
     eval_pair_index = int(artifacts.get("eval_pair_index", 0))
     test_case_index = int(artifacts.get("test_case_index", 0))
     test_step_index = int(artifacts.get("test_step_index", 0))
-    training = raw_config.get("training", {})
     progress = raw_config.get("progress", {})
     progress_enabled = bool(progress.get("enabled", False))
     data_progress = bool(progress.get("data_generation", progress_enabled))
     training_progress = bool(progress.get("training", progress_enabled))
     eval_progress = bool(progress.get("evaluation", progress_enabled))
-    requested_device = args.device if args.device is not None else str(training.get("device", "auto"))
 
     results = run_single_seed(
         config,
         args.method,
         args.seed,
         device=requested_device,
+        loss=requested_loss,
+        basis=requested_basis,
         eval_pair_index=eval_pair_index,
         test_case_index=test_case_index,
         test_step_index=test_step_index,
@@ -302,6 +325,8 @@ def main() -> None:
         "seed": args.seed,
         "device_requested": requested_device,
         "device_resolved": resolved_device,
+        "loss": requested_loss,
+        "basis": requested_basis,
         "metrics": results,
         "viz_indices": viz_payload["indices"],
     }
@@ -312,7 +337,10 @@ def main() -> None:
 
         save_clean_noisy_summary_plot(
             results,
-            title=f"Reaction-Diffusion | method={args.method} | seed={args.seed}",
+            title=(
+                f"Reaction-Diffusion | method={args.method} | loss={requested_loss} "
+                f"| basis={requested_basis} | seed={args.seed}"
+            ),
             output_path=run_out_dir / "summary.png",
         )
 
@@ -387,6 +415,8 @@ def main() -> None:
 
     print("Run complete")
     print(f"Device: requested={requested_device} resolved={resolved_device}")
+    print(f"Loss: {requested_loss}")
+    print(f"Basis: {requested_basis}")
     print(f"Results: {run_out_dir / 'results.json'}")
     print(f"Checkpoints: {run_ckpt_dir}")
 

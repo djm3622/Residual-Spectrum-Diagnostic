@@ -4,6 +4,11 @@ checkpoints/*
 output/*
 !output/.gitkeep
 old/
+.pycache_local/
+logs/
+
+# files
+run_all_conv_seed1_loss_basis.sh
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
