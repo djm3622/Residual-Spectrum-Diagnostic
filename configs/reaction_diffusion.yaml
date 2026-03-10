@@ -1,0 +1,39 @@
+experiment:
+  name: reaction_diffusion
+
+grid:
+  nx: 64
+  ny: 64
+  Lx: 2.5
+  Ly: 2.5
+
+physics:
+  Du: 0.16
+  Dv: 0.08
+  F: 0.035
+  k: 0.065
+
+time:
+  t_final: 1000.0
+  n_snapshots: 15
+  dt: 1.0
+
+data:
+  n_train_trajectories: 5
+  n_test_trajectories: 3
+
+training:
+  noise_level: 0.03
+  lr: 0.05
+  n_iter: 100
+
+rsd:
+  omega_1_frac: 0.0625
+  omega_2_frac: 0.1666666667
+
+paths:
+  output_dir: output
+  checkpoint_dir: checkpoints
+
+artifacts:
+  save_figures: true

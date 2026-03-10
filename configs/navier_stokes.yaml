@@ -1,0 +1,36 @@
+experiment:
+  name: navier_stokes
+
+grid:
+  nx: 64
+  ny: 64
+  Lx: 6.283185307179586
+  Ly: 6.283185307179586
+
+physics:
+  nu: 0.001
+
+time:
+  t_final: 1.0
+  n_snapshots: 20
+  dt_max: 0.01
+
+data:
+  n_train_trajectories: 8
+  n_test_trajectories: 6
+
+training:
+  noise_level: 0.04
+  lr: 0.1
+  n_iter: 100
+
+rsd:
+  omega_1_frac: 0.0625
+  omega_2_frac: 0.1666666667
+
+paths:
+  output_dir: output
+  checkpoint_dir: checkpoints
+
+artifacts:
+  save_figures: true
