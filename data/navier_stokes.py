@@ -32,6 +32,8 @@ class NSConfig:
     noise_level: float = 0.04
     train_lr: float = 0.1
     train_iterations: int = 100
+    train_batch_size: int = 32
+    train_grad_clip: float = 1.0
 
     omega_1_frac: float = 1 / 16
     omega_2_frac: float = 1 / 6
@@ -67,6 +69,8 @@ class NSConfig:
             noise_level=float(training["noise_level"]),
             train_lr=float(training["lr"]),
             train_iterations=int(training["n_iter"]),
+            train_batch_size=int(training.get("batch_size", 32)),
+            train_grad_clip=float(training.get("grad_clip", 1.0)),
             omega_1_frac=float(rsd["omega_1_frac"]),
             omega_2_frac=float(rsd["omega_2_frac"]),
         )

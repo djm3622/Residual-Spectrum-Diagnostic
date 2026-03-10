@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Tuple
 
 import numpy as np
-from scipy.fft import fftfreq, ifft2
+from scipy.fft import fft2, fftfreq, ifft2
 
 
 def add_hf_noise_2d(
@@ -13,23 +13,33 @@ def add_hf_noise_2d(
     noise_level: float,
     nx: int,
     ny: int,
+    Lx: float | None = None,
+    Ly: float | None = None,
     hf_fraction: float = 0.25,
 ) -> np.ndarray:
     """Inject Gaussian random noise only into the high-frequency Fourier band."""
-    kx = fftfreq(nx, d=1.0 / nx)
-    ky = fftfreq(ny, d=1.0 / ny)
+    if Lx is None:
+        Lx = 1.0
+    if Ly is None:
+        Ly = 1.0
+
+    dx = float(Lx) / float(nx)
+    dy = float(Ly) / float(ny)
+    kx = fftfreq(nx, d=dx) * 2 * np.pi
+    ky = fftfreq(ny, d=dy) * 2 * np.pi
     kx_grid, ky_grid = np.meshgrid(kx, ky, indexing="ij")
     k_mag = np.sqrt(kx_grid**2 + ky_grid**2)
 
-    k_min = hf_fraction * min(nx, ny) / 2
-    k_max = min(nx, ny) / 2
+    k_nyq = min(np.pi / dx, np.pi / dy)
+    k_min = hf_fraction * k_nyq
+    k_max = k_nyq
     hf_mask = (k_mag >= k_min) & (k_mag <= k_max)
 
+    # Build noise in physical space first; spectral masking then preserves Hermitian symmetry.
+    base_noise = np.random.randn(nx, ny)
+    base_noise_hat = fft2(base_noise)
     noise_hat = np.zeros((nx, ny), dtype=complex)
-    phases = np.random.uniform(0, 2 * np.pi, (nx, ny))
-    amplitudes = np.random.randn(nx, ny)
-    noise_hat[hf_mask] = amplitudes[hf_mask] * np.exp(1j * phases[hf_mask])
-
+    noise_hat[hf_mask] = base_noise_hat[hf_mask]
     noise = np.real(ifft2(noise_hat))
 
     std = np.std(noise)
@@ -45,8 +55,10 @@ def add_hf_noise_coupled(
     noise_level: float,
     nx: int,
     ny: int,
+    Lx: float | None = None,
+    Ly: float | None = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Inject independent high-frequency noise into both fields of a coupled system."""
-    u_noisy = add_hf_noise_2d(u, noise_level, nx, ny)
-    v_noisy = add_hf_noise_2d(v, noise_level, nx, ny)
+    u_noisy = add_hf_noise_2d(u, noise_level, nx, ny, Lx=Lx, Ly=Ly)
+    v_noisy = add_hf_noise_2d(v, noise_level, nx, ny, Lx=Lx, Ly=Ly)
     return np.clip(u_noisy, 0, 1), np.clip(v_noisy, 0, 1)

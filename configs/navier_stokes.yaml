@@ -16,13 +16,22 @@ time:
   dt_max: 0.01
 
 data:
-  n_train_trajectories: 8
+  n_train_trajectories: 24
   n_test_trajectories: 6
 
 training:
+  device: mps
   noise_level: 0.04
-  lr: 0.1
-  n_iter: 100
+  lr: 0.001
+  n_iter: 150
+  batch_size: 32
+  grad_clip: 1.0
+
+progress:
+  enabled: true
+  data_generation: true
+  training: true
+  evaluation: true
 
 rsd:
   omega_1_frac: 0.0625
@@ -34,3 +43,14 @@ paths:
 
 artifacts:
   save_figures: true
+  save_fit_visualizations: true
+  fit_visualization:
+    input:
+      cmap: cividis
+      border_color: "#2A9D8F"
+      border_width: 2.0
+    output:
+      cmap: RdBu_r
+  eval_pair_index: 0
+  test_case_index: 0
+  test_step_index: 0

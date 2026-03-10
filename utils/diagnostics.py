@@ -25,7 +25,9 @@ class NavierStokesRSDAnalyzer:
         self.KX, self.KY = np.meshgrid(self.kx, self.ky, indexing="ij")
         self.K_mag = np.sqrt(self.KX**2 + self.KY**2)
 
-        k_nyq = min(self.nx, self.ny) / 2
+        dx = config.Lx / config.nx
+        dy = config.Ly / config.ny
+        k_nyq = min(np.pi / dx, np.pi / dy)
         self.k_low = max(1, k_nyq * config.omega_1_frac)
         self.k_high = k_nyq * config.omega_2_frac
         self.k_max = k_nyq
@@ -110,7 +112,7 @@ class ReactionDiffusionRSDAnalyzer:
         self.K2 = self.KX**2 + self.KY**2
         self.K_mag = np.sqrt(self.KX**2 + self.KY**2)
 
-        k_nyq = min(self.nx, self.ny) / 2
+        k_nyq = min(np.pi / dx, np.pi / dy)
         self.k_low = max(1, k_nyq * config.omega_1_frac)
         self.k_high = k_nyq * config.omega_2_frac
         self.k_max = k_nyq

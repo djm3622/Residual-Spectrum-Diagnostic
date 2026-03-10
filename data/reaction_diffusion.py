@@ -35,6 +35,8 @@ class GrayScottConfig:
     noise_level: float = 0.03
     train_lr: float = 0.05
     train_iterations: int = 100
+    train_batch_size: int = 32
+    train_grad_clip: float = 1.0
 
     omega_1_frac: float = 1 / 16
     omega_2_frac: float = 1 / 6
@@ -73,6 +75,8 @@ class GrayScottConfig:
             noise_level=float(training["noise_level"]),
             train_lr=float(training["lr"]),
             train_iterations=int(training["n_iter"]),
+            train_batch_size=int(training.get("batch_size", 32)),
+            train_grad_clip=float(training.get("grad_clip", 1.0)),
             omega_1_frac=float(rsd["omega_1_frac"]),
             omega_2_frac=float(rsd["omega_2_frac"]),
         )
@@ -115,17 +119,23 @@ class GrayScottSolver:
         dv = uv2 - (self.F + self.k) * v
         return du, dv
 
-    def step(self, u: np.ndarray, v: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def step(self, u: np.ndarray, v: np.ndarray, dt: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
         """Single operator-split timestep."""
+        if dt is None:
+            dt = self.dt
+
+        diffusion_u = np.exp(-self.Du * self.K2 * dt)
+        diffusion_v = np.exp(-self.Dv * self.K2 * dt)
+
         u_hat = fft2(u)
         v_hat = fft2(v)
 
-        u = np.real(ifft2(u_hat * self.diffusion_u))
-        v = np.real(ifft2(v_hat * self.diffusion_v))
+        u = np.real(ifft2(u_hat * diffusion_u))
+        v = np.real(ifft2(v_hat * diffusion_v))
 
         du, dv = self.reaction_terms(u, v)
-        u = np.clip(u + self.dt * du, 0, 1)
-        v = np.clip(v + self.dt * dv, 0, 1)
+        u = np.clip(u + dt * du, 0, 1)
+        v = np.clip(v + dt * dv, 0, 1)
 
         return u, v
 
@@ -137,25 +147,27 @@ class GrayScottSolver:
         n_snapshots: int,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Integrate from (u0, v0) and return snapshot trajectories."""
-        n_steps = int(t_final / self.dt)
-        save_interval = max(1, n_steps // (n_snapshots - 1))
-
-        t_save = []
-        u_traj = []
-        v_traj = []
+        t_save = np.linspace(0.0, t_final, n_snapshots)
+        u_traj = np.zeros((n_snapshots, self.nx, self.ny))
+        v_traj = np.zeros((n_snapshots, self.nx, self.ny))
 
         u, v = u0.copy(), v0.copy()
+        u_traj[0] = u
+        v_traj[0] = v
+        t = 0.0
+        save_idx = 1
 
-        for step in range(n_steps + 1):
-            if step % save_interval == 0 and len(t_save) < n_snapshots:
-                t_save.append(step * self.dt)
-                u_traj.append(u.copy())
-                v_traj.append(v.copy())
+        while save_idx < n_snapshots:
+            dt_step = min(self.dt, t_save[save_idx] - t)
+            u, v = self.step(u, v, dt=dt_step)
+            t += dt_step
 
-            if step < n_steps:
-                u, v = self.step(u, v)
+            if t >= t_save[save_idx] - 1e-12:
+                u_traj[save_idx] = u
+                v_traj[save_idx] = v
+                save_idx += 1
 
-        return np.array(t_save), np.array(u_traj), np.array(v_traj)
+        return t_save, u_traj, v_traj
 
     def initial_condition_random_seeds(
         self,

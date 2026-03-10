@@ -10,22 +10,31 @@ grid:
 physics:
   Du: 0.16
   Dv: 0.08
-  F: 0.035
-  k: 0.065
+  F: 0.022
+  k: 0.051
 
 time:
-  t_final: 1000.0
-  n_snapshots: 15
-  dt: 1.0
+  t_final: 20.0
+  n_snapshots: 121
+  dt: 0.1
 
 data:
-  n_train_trajectories: 5
+  n_train_trajectories: 16
   n_test_trajectories: 3
 
 training:
+  device: mps
   noise_level: 0.03
-  lr: 0.05
-  n_iter: 100
+  lr: 0.001
+  n_iter: 150
+  batch_size: 32
+  grad_clip: 1.0
+
+progress:
+  enabled: true
+  data_generation: true
+  training: true
+  evaluation: true
 
 rsd:
   omega_1_frac: 0.0625
@@ -37,3 +46,14 @@ paths:
 
 artifacts:
   save_figures: true
+  save_fit_visualizations: true
+  fit_visualization:
+    input:
+      cmap: cividis
+      border_color: "#2A9D8F"
+      border_width: 2.0
+    output:
+      cmap: viridis
+  eval_pair_index: 20
+  test_case_index: 0
+  test_step_index: 20
