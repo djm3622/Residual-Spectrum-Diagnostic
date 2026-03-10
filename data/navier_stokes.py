@@ -34,6 +34,10 @@ class NSConfig:
     train_iterations: int = 100
     train_batch_size: int = 32
     train_grad_clip: float = 1.0
+    train_rollout_horizon: int = 4
+    train_rollout_weight: float = 0.5
+    train_model_width: int = 64
+    train_model_depth: int = 5
 
     omega_1_frac: float = 1 / 16
     omega_2_frac: float = 1 / 6
@@ -71,6 +75,10 @@ class NSConfig:
             train_iterations=int(training["n_iter"]),
             train_batch_size=int(training.get("batch_size", 32)),
             train_grad_clip=float(training.get("grad_clip", 1.0)),
+            train_rollout_horizon=int(training.get("rollout_horizon", 4)),
+            train_rollout_weight=float(training.get("rollout_weight", 0.5)),
+            train_model_width=int(training.get("model_width", 64)),
+            train_model_depth=int(training.get("model_depth", 5)),
             omega_1_frac=float(rsd["omega_1_frac"]),
             omega_2_frac=float(rsd["omega_2_frac"]),
         )

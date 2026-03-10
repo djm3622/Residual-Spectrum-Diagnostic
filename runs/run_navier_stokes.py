@@ -133,8 +133,26 @@ def run_single_seed(
                 )
             )
 
-    model_clean = build_model(method, config.nx, config.ny, seed=seed, device=device, loss=loss)
-    model_noisy = build_model(method, config.nx, config.ny, seed=seed + 10000, device=device, loss=loss)
+    model_clean = build_model(
+        method,
+        config.nx,
+        config.ny,
+        seed=seed,
+        device=device,
+        loss=loss,
+        model_width=config.train_model_width,
+        model_depth=config.train_model_depth,
+    )
+    model_noisy = build_model(
+        method,
+        config.nx,
+        config.ny,
+        seed=seed + 10000,
+        device=device,
+        loss=loss,
+        model_width=config.train_model_width,
+        model_depth=config.train_model_depth,
+    )
 
     model_clean.train(
         inputs,
@@ -143,6 +161,9 @@ def run_single_seed(
         n_iter=config.train_iterations,
         batch_size=config.train_batch_size,
         grad_clip=config.train_grad_clip,
+        trajectory=train_trajectories,
+        rollout_horizon=config.train_rollout_horizon,
+        rollout_weight=config.train_rollout_weight,
         show_progress=show_training_progress,
         progress_desc="Training clean model",
     )
@@ -153,6 +174,9 @@ def run_single_seed(
         n_iter=config.train_iterations,
         batch_size=config.train_batch_size,
         grad_clip=config.train_grad_clip,
+        trajectory=train_trajectories,
+        rollout_horizon=config.train_rollout_horizon,
+        rollout_weight=config.train_rollout_weight,
         show_progress=show_training_progress,
         progress_desc="Training noisy model",
     )

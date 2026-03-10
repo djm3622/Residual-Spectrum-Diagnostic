@@ -45,7 +45,8 @@ Each YAML controls all run parameters, including:
 - time integration
 - train/test trajectory counts
 - training hyperparameters (`noise_level`, `lr`, `n_iter`, `batch_size`, `grad_clip`)
-- rollout-stability controls for RD (`training.rollout_horizon`, `training.rollout_weight`)
+- rollout-stability controls (`training.rollout_horizon`, `training.rollout_weight`)
+- model capacity controls for NS conv surrogate (`training.model_width`, `training.model_depth`)
 - training objective (`training.loss`: `combined`, `l2`, `l1`, `spectral_decay`, `energy`)
 - progress bars (`progress.enabled`, `progress.data_generation`, `progress.training`, `progress.evaluation`)
 - RSD projection basis (`rsd.basis`: `fourier`, `laplace`, `wavelet`, `svd`) and band settings (`omega_1_frac`, `omega_2_frac`)

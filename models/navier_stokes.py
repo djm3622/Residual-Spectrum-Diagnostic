@@ -34,6 +34,9 @@ class OneStepModel(Protocol):
         n_iter: int,
         batch_size: int = 32,
         grad_clip: float = 1.0,
+        trajectory: List[np.ndarray] | None = None,
+        rollout_horizon: int = 1,
+        rollout_weight: float = 0.0,
         show_progress: bool = False,
         progress_desc: str | None = None,
     ) -> None:
@@ -72,7 +75,7 @@ class _PeriodicConvBlock(nn.Module):
 class _NSNonlinearOneStepNet(nn.Module):
     """One-step nonlinear residual map: omega_{t+1} = omega_t + Delta(omega_t)."""
 
-    def __init__(self, width: int = 32, depth: int = 3):
+    def __init__(self, width: int = 64, depth: int = 5):
         super().__init__()
         self.in_proj = nn.Conv2d(1, width, kernel_size=1)
         self.blocks = nn.ModuleList([_PeriodicConvBlock(width) for _ in range(depth)])
@@ -104,6 +107,8 @@ class ConvolutionalSurrogate2D:
         seed: int | None = None,
         device: str = "auto",
         loss: str = "combined",
+        model_width: int = 64,
+        model_depth: int = 5,
     ):
         self.nx = nx
         self.ny = ny
@@ -117,7 +122,9 @@ class ConvolutionalSurrogate2D:
             torch.manual_seed(seed)
             np.random.seed(seed)
 
-        self.net = _NSNonlinearOneStepNet().to(self.device)
+        width = max(8, int(model_width))
+        depth = max(1, int(model_depth))
+        self.net = _NSNonlinearOneStepNet(width=width, depth=depth).to(self.device)
         self.net.eval()
 
     def forward(self, omega: np.ndarray) -> np.ndarray:
@@ -135,6 +142,9 @@ class ConvolutionalSurrogate2D:
         n_iter: int = 100,
         batch_size: int = 32,
         grad_clip: float = 1.0,
+        trajectory: List[np.ndarray] | None = None,
+        rollout_horizon: int = 1,
+        rollout_weight: float = 0.0,
         show_progress: bool = False,
         progress_desc: str | None = None,
     ) -> None:
@@ -147,6 +157,22 @@ class ConvolutionalSurrogate2D:
         n_samples = x_train.shape[0]
         batch = max(1, min(int(batch_size), n_samples))
         clip = max(float(grad_clip), 1e-8)
+        horizon = max(1, int(rollout_horizon))
+        rollout_w = max(0.0, float(rollout_weight))
+
+        use_rollout = rollout_w > 0.0 and horizon > 1 and trajectory is not None and len(trajectory) > 0
+        if use_rollout:
+            seq = torch.from_numpy(np.asarray(trajectory, dtype=np.float32)).to(self.device)
+            n_traj, n_steps, _, _ = seq.shape
+            max_start = n_steps - horizon - 1
+            if max_start < 0:
+                use_rollout = False
+            else:
+                rollout_batch = max(1, min(batch // 2, n_traj))
+        else:
+            seq = None
+            rollout_batch = 0
+            max_start = -1
 
         optimizer = build_adam_optimizer(self.net.parameters(), lr=float(lr), device=self.device)
 
@@ -162,7 +188,22 @@ class ConvolutionalSurrogate2D:
 
                 with train_autocast(self.device):
                     pred = self.net(xb)
-                    loss = self.objective_loss(pred, yb)
+                    one_step_loss = self.objective_loss(pred, yb)
+
+                    rollout_loss = torch.zeros((), device=self.device, dtype=one_step_loss.dtype)
+                    if use_rollout and seq is not None and rollout_batch > 0:
+                        traj_idx = torch.randint(0, seq.shape[0], (rollout_batch,), device=self.device)
+                        start_idx = torch.randint(0, max_start + 1, (rollout_batch,), device=self.device)
+
+                        state_roll = seq[traj_idx, start_idx]
+                        for offset in range(1, horizon + 1):
+                            pred_roll = self.net(state_roll)
+                            target_roll = seq[traj_idx, start_idx + offset]
+                            rollout_loss = rollout_loss + self.objective_loss(pred_roll, target_roll)
+                            state_roll = pred_roll
+                        rollout_loss = rollout_loss / float(horizon)
+
+                    loss = one_step_loss + rollout_w * rollout_loss
 
                 if not torch.isfinite(loss):
                     continue
@@ -209,12 +250,22 @@ def build_model(
     seed: int,
     device: str = "auto",
     loss: str = "combined",
+    model_width: int = 64,
+    model_depth: int = 5,
 ) -> OneStepModel:
     """Factory for NS surrogate models selected by CLI method arg."""
     normalized = method.strip().lower()
 
     if normalized in {"conv", "convolutional", "spectral", "nonlinear"}:
-        return ConvolutionalSurrogate2D(nx, ny, seed=seed, device=device, loss=loss)
+        return ConvolutionalSurrogate2D(
+            nx,
+            ny,
+            seed=seed,
+            device=device,
+            loss=loss,
+            model_width=model_width,
+            model_depth=model_depth,
+        )
 
     raise ValueError(
         f"Unsupported method '{method}'. Use one of: conv, convolutional, spectral, nonlinear"

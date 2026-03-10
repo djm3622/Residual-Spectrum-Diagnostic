@@ -8,12 +8,12 @@ grid:
   Ly: 6.283185307179586
 
 physics:
-  nu: 0.001
+  nu: 0.01
 
 time:
-  t_final: 1.0
+  t_final: 5.0
   n_snapshots: 20
-  dt_max: 0.01
+  dt_max: 0.1
 
 data:
   n_train_trajectories: 24
@@ -24,9 +24,13 @@ training:
   loss: combined
   noise_level: 0.04
   lr: 0.001
-  n_iter: 150
+  n_iter: 300
   batch_size: 32
   grad_clip: 1.0
+  rollout_horizon: 4
+  rollout_weight: 0.6
+  model_width: 64
+  model_depth: 5
 
 progress:
   enabled: true
