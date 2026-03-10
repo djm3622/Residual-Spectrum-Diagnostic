@@ -6,9 +6,11 @@ output/*
 old/
 .pycache_local/
 logs/
+std_out/
 
 # files
 run_all_conv_seed1_loss_basis.sh
+batch_train.sh
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
