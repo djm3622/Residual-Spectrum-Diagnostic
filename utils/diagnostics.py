@@ -277,7 +277,7 @@ class NavierStokesRSDAnalyzer:
         self.ns_solver = NavierStokes2D(config)
 
     def compute_residual(self, omega_traj: np.ndarray, dt: float) -> np.ndarray:
-        """Residual: r = ∂ω/∂t + (u·∇)ω - ν∇²ω."""
+        """Residual: r = ∂ω/∂t + (u·∇)ω - ν∇²ω - f."""
         residuals = []
         K2 = self.KX**2 + self.KY**2
 
@@ -288,8 +288,9 @@ class NavierStokesRSDAnalyzer:
             d_omega_dt = (omega_traj[t + 1] - omega_traj[t - 1]) / (2 * dt)
             advection = self.ns_solver.compute_nonlinear_term(omega)
             diffusion = np.real(ifft2(-self.nu * K2 * omega_hat))
+            forcing = self.ns_solver.compute_forcing(float(t) * float(dt))
 
-            residuals.append(d_omega_dt + advection - diffusion)
+            residuals.append(d_omega_dt + advection - diffusion - forcing)
 
         return np.array(residuals)
 

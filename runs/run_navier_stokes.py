@@ -66,7 +66,7 @@ def run_single_seed(
         desc="Data gen (train)",
         total=config.n_train_trajectories,
     ):
-        omega0 = solver.random_initial_condition(seed=seed * 1000 + idx)
+        omega0 = solver.sample_initial_condition(seed=seed * 1000 + idx, index=idx)
         t_save, omega_traj = solver.solve(omega0, config.t_final, config.n_snapshots)
         train_trajectories.append(omega_traj)
     dt = float(t_save[1] - t_save[0])
@@ -78,7 +78,7 @@ def run_single_seed(
         desc="Data gen (test)",
         total=config.n_test_trajectories,
     ):
-        omega0 = solver.random_initial_condition(seed=seed * 1000 + 500 + idx)
+        omega0 = solver.sample_initial_condition(seed=seed * 1000 + 500 + idx, index=10_000 + idx)
         _, omega_true = solver.solve(omega0, config.t_final, config.n_snapshots)
         test_cases.append({"omega0": omega0, "omega_true": omega_true})
 

@@ -33,8 +33,14 @@ training:
   n_iter: 300
   batch_size: 32
   grad_clip: 1.0
-  rollout_horizon: 4
-  rollout_weight: 0.7
+  rollout_horizon: 6
+  rollout_weight: 0.8
+  u_weight: 1.5
+  v_weight: 1.0
+  channel_balance_cap: 3.0
+  dynamics_weight: 0.2
+  early_step_bias: 1.0
+  early_step_decay: 24.0
 
 progress:
   enabled: true

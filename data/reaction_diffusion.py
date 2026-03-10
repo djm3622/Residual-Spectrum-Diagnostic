@@ -43,6 +43,12 @@ class GrayScottConfig:
     train_grad_clip: float = 1.0
     train_rollout_horizon: int = 4
     train_rollout_weight: float = 0.6
+    train_u_weight: float = 1.35
+    train_v_weight: float = 1.0
+    train_channel_balance_cap: float = 3.0
+    train_dynamics_weight: float = 0.25
+    train_early_step_bias: float = 1.0
+    train_early_step_decay: float = 24.0
 
     omega_1_frac: float = 1 / 16
     omega_2_frac: float = 1 / 6
@@ -89,6 +95,12 @@ class GrayScottConfig:
             train_grad_clip=float(training.get("grad_clip", 1.0)),
             train_rollout_horizon=int(training.get("rollout_horizon", 4)),
             train_rollout_weight=float(training.get("rollout_weight", 0.6)),
+            train_u_weight=float(training.get("u_weight", 1.35)),
+            train_v_weight=float(training.get("v_weight", 1.0)),
+            train_channel_balance_cap=float(training.get("channel_balance_cap", 3.0)),
+            train_dynamics_weight=float(training.get("dynamics_weight", 0.25)),
+            train_early_step_bias=float(training.get("early_step_bias", 1.0)),
+            train_early_step_decay=float(training.get("early_step_decay", 24.0)),
             omega_1_frac=float(rsd["omega_1_frac"]),
             omega_2_frac=float(rsd["omega_2_frac"]),
         )

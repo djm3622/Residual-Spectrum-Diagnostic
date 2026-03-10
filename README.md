@@ -46,6 +46,8 @@ Each YAML controls all run parameters, including:
 - train/test trajectory counts
 - training hyperparameters (`noise_level`, `lr`, `n_iter`, `batch_size`, `grad_clip`)
 - rollout-stability controls (`training.rollout_horizon`, `training.rollout_weight`)
+- coupled-species balancing controls (`training.u_weight`, `training.v_weight`, `training.channel_balance_cap`)
+- transient-tracking controls (`training.dynamics_weight`, `training.early_step_bias`, `training.early_step_decay`)
 - model capacity controls for NS conv surrogate (`training.model_width`, `training.model_depth`)
 - training objective (`training.loss`: `combined`, `l2`, `l1`, `spectral_decay`, `energy`)
 - progress bars (`progress.enabled`, `progress.data_generation`, `progress.training`, `progress.evaluation`)

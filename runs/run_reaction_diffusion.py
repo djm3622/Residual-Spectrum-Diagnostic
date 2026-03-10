@@ -133,10 +133,17 @@ def run_single_seed(
 
     inputs_u: List[np.ndarray] = []
     inputs_v: List[np.ndarray] = []
+    inputs_u_noisy: List[np.ndarray] = []
+    inputs_v_noisy: List[np.ndarray] = []
     targets_u_clean: List[np.ndarray] = []
     targets_v_clean: List[np.ndarray] = []
     targets_u_noisy: List[np.ndarray] = []
     targets_v_noisy: List[np.ndarray] = []
+    pair_steps: List[int] = []
+    train_trajectory_u: List[np.ndarray] = []
+    train_trajectory_v: List[np.ndarray] = []
+    train_trajectory_u_noisy: List[np.ndarray] = []
+    train_trajectory_v_noisy: List[np.ndarray] = []
 
     for data in progress_iter(
         train_data,
@@ -144,29 +151,39 @@ def run_single_seed(
         desc="Build train pairs",
         total=len(train_data),
     ):
-        u_traj = data["u"]
-        v_traj = data["v"]
+        u_traj = np.asarray(data["u"], dtype=np.float32)
+        v_traj = np.asarray(data["v"], dtype=np.float32)
 
-        for step in range(len(u_traj) - 1):
-            inputs_u.append(u_traj[step])
-            inputs_v.append(v_traj[step])
-            targets_u_clean.append(u_traj[step + 1])
-            targets_v_clean.append(v_traj[step + 1])
-
-            u_noisy, v_noisy = add_hf_noise_coupled(
-                u_traj[step + 1],
-                v_traj[step + 1],
+        u_traj_noisy = np.empty_like(u_traj, dtype=np.float32)
+        v_traj_noisy = np.empty_like(v_traj, dtype=np.float32)
+        for step in range(len(u_traj)):
+            u_noisy_step, v_noisy_step = add_hf_noise_coupled(
+                u_traj[step],
+                v_traj[step],
                 config.noise_level,
                 config.nx,
                 config.ny,
                 Lx=config.Lx,
                 Ly=config.Ly,
             )
-            targets_u_noisy.append(u_noisy)
-            targets_v_noisy.append(v_noisy)
+            u_traj_noisy[step] = np.asarray(u_noisy_step, dtype=np.float32)
+            v_traj_noisy[step] = np.asarray(v_noisy_step, dtype=np.float32)
 
-    train_trajectory_u = [np.asarray(data["u"], dtype=np.float32) for data in train_data]
-    train_trajectory_v = [np.asarray(data["v"], dtype=np.float32) for data in train_data]
+        train_trajectory_u.append(u_traj)
+        train_trajectory_v.append(v_traj)
+        train_trajectory_u_noisy.append(u_traj_noisy)
+        train_trajectory_v_noisy.append(v_traj_noisy)
+
+        for step in range(len(u_traj) - 1):
+            inputs_u.append(u_traj[step])
+            inputs_v.append(v_traj[step])
+            inputs_u_noisy.append(u_traj_noisy[step])
+            inputs_v_noisy.append(v_traj_noisy[step])
+            targets_u_clean.append(u_traj[step + 1])
+            targets_v_clean.append(v_traj[step + 1])
+            targets_u_noisy.append(u_traj_noisy[step + 1])
+            targets_v_noisy.append(v_traj_noisy[step + 1])
+            pair_steps.append(step)
 
     model_clean = build_model(
         method,
@@ -202,22 +219,36 @@ def run_single_seed(
         trajectory_v=train_trajectory_v,
         rollout_horizon=config.train_rollout_horizon,
         rollout_weight=config.train_rollout_weight,
+        pair_steps=pair_steps,
+        u_weight=config.train_u_weight,
+        v_weight=config.train_v_weight,
+        channel_balance_cap=config.train_channel_balance_cap,
+        dynamics_weight=config.train_dynamics_weight,
+        early_step_bias=config.train_early_step_bias,
+        early_step_decay=config.train_early_step_decay,
         show_progress=show_training_progress,
         progress_desc="Training clean model",
     )
     model_noisy.train(
-        inputs_u,
-        inputs_v,
+        inputs_u_noisy,
+        inputs_v_noisy,
         targets_u_noisy,
         targets_v_noisy,
         lr=config.train_lr,
         n_iter=config.train_iterations,
         batch_size=config.train_batch_size,
         grad_clip=config.train_grad_clip,
-        trajectory_u=train_trajectory_u,
-        trajectory_v=train_trajectory_v,
+        trajectory_u=train_trajectory_u_noisy,
+        trajectory_v=train_trajectory_v_noisy,
         rollout_horizon=config.train_rollout_horizon,
         rollout_weight=config.train_rollout_weight,
+        pair_steps=pair_steps,
+        u_weight=config.train_u_weight,
+        v_weight=config.train_v_weight,
+        channel_balance_cap=config.train_channel_balance_cap,
+        dynamics_weight=config.train_dynamics_weight,
+        early_step_bias=config.train_early_step_bias,
+        early_step_decay=config.train_early_step_decay,
         show_progress=show_training_progress,
         progress_desc="Training noisy model",
     )

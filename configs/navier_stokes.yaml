@@ -9,15 +9,28 @@ grid:
 
 physics:
   nu: 0.01
+  forcing:
+    type: sinusoidal
+    amplitude: 3.0
+    kx: 1
+    ky: 2
+    omega: 0.5
+    phase: 0.0
 
 time:
-  t_final: 5.0
+  t_final: 0.019
   n_snapshots: 20
-  dt_max: 0.1
+  dt_max: 0.001
 
 data:
   n_train_trajectories: 24
   n_test_trajectories: 6
+  initial_condition: line_wave
+  initial_n_modes: 1
+  initial_kmax: 1
+  initial_target_rms: 0.0
+  line_axis: diagonal_pos
+  line_amplitude: 0.05
 
 training:
   device: mps
