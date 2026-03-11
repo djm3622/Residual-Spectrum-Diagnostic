@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import glob
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 import numpy as np
 
@@ -36,6 +37,7 @@ class PDEBenchSourceConfig:
     """Settings for loading Navier-Stokes-like trajectories from PDEBench HDF5."""
 
     file_path: str = ""
+    file_paths: List[str] = field(default_factory=list)
     dataset_key: str = "tensor"
     layout: str = "AUTO"
     channel_index: int = 0
@@ -101,6 +103,7 @@ def external_data_config_from_yaml(raw_config: Mapping[str, Any]) -> ExternalNav
     )
     pde_cfg = PDEBenchSourceConfig(
         file_path=str(pde_raw.get("file_path", "")),
+        file_paths=_as_string_list(pde_raw.get("file_paths")),
         dataset_key=str(pde_raw.get("dataset_key", "tensor")),
         layout=str(pde_raw.get("layout", "AUTO")),
         channel_index=int(pde_raw.get("channel_index", 0)),
@@ -329,71 +332,93 @@ def _load_pdebench(
             "PDEBench source requires `h5py`. Install it with: python3 -m pip install h5py"
         ) from exc
 
-    dataset_path = Path(source_cfg.file_path).expanduser()
-    if not dataset_path.exists():
-        raise FileNotFoundError(
-            f"PDEBench file not found: {dataset_path}. "
-            "Set data.external.pdebench.file_path to a local HDF5 file."
-        )
+    time_stride = max(1, int(source_cfg.time_stride))
+    spatial_stride = max(1, int(source_cfg.spatial_stride))
+    dataset_paths = _resolve_pdebench_input_paths(source_cfg)
 
-    with h5py.File(dataset_path, "r") as handle:
-        keys = list(handle.keys())
-        if not keys:
-            raise ValueError(f"PDEBench file has no datasets: {dataset_path}")
+    all_trajectories: List[np.ndarray] = []
+    dataset_keys_used: List[str] = []
+    layouts_used: List[str] = []
+    converted_count = 0
+    dt_from_files: List[float] = []
+    per_file_shapes: Dict[str, Dict[str, Any]] = {}
 
-        dataset_key = str(source_cfg.dataset_key).strip()
-        if not dataset_key:
-            dataset_key = "tensor"
-        if dataset_key not in handle:
-            if dataset_key == "tensor":
-                for candidate in ("velocity", "density", "particles"):
-                    if candidate in handle:
-                        dataset_key = candidate
-                        break
+    for dataset_path in dataset_paths:
+        with h5py.File(dataset_path, "r") as handle:
+            keys = list(handle.keys())
+            if not keys:
+                raise ValueError(f"PDEBench file has no datasets: {dataset_path}")
+
+            dataset_key = str(source_cfg.dataset_key).strip()
+            if not dataset_key:
+                dataset_key = "tensor"
+            if dataset_key not in handle:
+                if dataset_key == "tensor":
+                    for candidate in ("velocity", "density", "particles"):
+                        if candidate in handle:
+                            dataset_key = candidate
+                            break
+                    else:
+                        raise KeyError(
+                            f"Dataset key '{dataset_key}' not found in {dataset_path}. Available keys: {keys}"
+                        )
                 else:
                     raise KeyError(
                         f"Dataset key '{dataset_key}' not found in {dataset_path}. Available keys: {keys}"
                     )
-            else:
-                raise KeyError(
-                    f"Dataset key '{dataset_key}' not found in {dataset_path}. Available keys: {keys}"
-                )
 
-        # Eagerly materialize the dataset into host memory so training does not read from disk.
-        raw = np.array(handle[dataset_key], dtype=np.float32, copy=True)
-        dt_from_file = _infer_dt_from_h5(handle)
+            # Eagerly materialize each source file so training does not hold open file descriptors.
+            raw = np.array(handle[dataset_key], dtype=np.float32, copy=True)
+            dt_from_file = _infer_dt_from_h5(handle)
 
-    keep_channels = str(dataset_key).strip().lower() == "velocity"
-    trajectories = _pdebench_array_to_trajectories(
-        raw,
-        layout=str(source_cfg.layout),
-        channel_index=int(source_cfg.channel_index),
-        keep_channels=keep_channels,
-    )
-    time_stride = max(1, int(source_cfg.time_stride))
-    spatial_stride = max(1, int(source_cfg.spatial_stride))
-    trajectories = trajectories[:, ::time_stride, ::spatial_stride, ::spatial_stride, ...]
-    converted_from_velocity = False
-    if trajectories.ndim == 5:
-        trajectories = _velocity_to_vorticity_trajectories(
-            trajectories,
-            Lx=float(config.Lx),
-            Ly=float(config.Ly),
+        keep_channels = str(dataset_key).strip().lower() == "velocity"
+        trajectories = _pdebench_array_to_trajectories(
+            raw,
+            layout=str(source_cfg.layout),
+            channel_index=int(source_cfg.channel_index),
+            keep_channels=keep_channels,
         )
-        converted_from_velocity = True
-    if trajectories.shape[1] < 2:
-        raise ValueError("PDEBench trajectories must contain at least 2 time steps.")
+        trajectories = trajectories[:, ::time_stride, ::spatial_stride, ::spatial_stride, ...]
+        converted_from_velocity = False
+        if trajectories.ndim == 5:
+            trajectories = _velocity_to_vorticity_trajectories(
+                trajectories,
+                Lx=float(config.Lx),
+                Ly=float(config.Ly),
+            )
+            converted_from_velocity = True
+            converted_count += 1
+        if trajectories.shape[1] < 2:
+            raise ValueError(f"PDEBench trajectories in {dataset_path} must contain at least 2 time steps.")
+
+        for idx in range(trajectories.shape[0]):
+            all_trajectories.append(
+                np.asarray(
+                    [_match_resolution(frame, config.nx, config.ny) for frame in trajectories[idx]],
+                    dtype=np.float32,
+                )
+            )
+
+        dataset_keys_used.append(str(dataset_key))
+        layouts_used.append(_resolve_layout(raw.ndim, source_cfg.layout))
+        if dt_from_file is not None:
+            dt_from_files.append(float(dt_from_file) * float(time_stride))
+        per_file_shapes[str(dataset_path.resolve())] = {
+            "raw_shape": tuple(int(dim) for dim in raw.shape),
+            "loaded_shape": tuple(int(dim) for dim in trajectories.shape),
+        }
 
     requested_train = int(source_cfg.n_train) if int(source_cfg.n_train) > 0 else int(config.n_train_trajectories)
     requested_test = int(source_cfg.n_test) if int(source_cfg.n_test) > 0 else int(config.n_test_trajectories)
     requested_total = requested_train + requested_test
-    if trajectories.shape[0] < requested_total:
+    total_samples = len(all_trajectories)
+    if total_samples < requested_total:
         raise ValueError(
-            f"PDEBench file has {trajectories.shape[0]} samples but "
+            f"PDEBench sources provide {total_samples} samples but "
             f"{requested_total} are required (train={requested_train}, test={requested_test})."
         )
 
-    indices = np.arange(trajectories.shape[0], dtype=int)
+    indices = np.arange(total_samples, dtype=int)
     if source_cfg.shuffle:
         rng = np.random.default_rng(seed * 1000 + int(source_cfg.split_seed_offset))
         rng.shuffle(indices)
@@ -401,46 +426,92 @@ def _load_pdebench(
     train_idx = indices[:requested_train]
     test_idx = indices[requested_train : requested_train + requested_test]
 
-    train_trajectories = [
-        np.asarray(
-            [_match_resolution(frame, config.nx, config.ny) for frame in trajectories[idx]],
-            dtype=np.float32,
-        )
-        for idx in train_idx
-    ]
-    test_trajectories = [
-        np.asarray(
-            [_match_resolution(frame, config.nx, config.ny) for frame in trajectories[idx]],
-            dtype=np.float32,
-        )
-        for idx in test_idx
-    ]
+    train_trajectories = [all_trajectories[int(idx)] for idx in train_idx]
+    test_trajectories = [all_trajectories[int(idx)] for idx in test_idx]
 
     dt_fallback = float(config.t_final / max(config.n_snapshots - 1, 1))
     if source_cfg.dt is not None:
         dt = float(source_cfg.dt) * float(time_stride)
-    elif dt_from_file is not None:
-        dt = float(dt_from_file) * float(time_stride)
+    elif dt_from_files:
+        dt = float(np.median(np.asarray(dt_from_files, dtype=np.float64)))
     else:
         dt = dt_fallback
 
+    unique_dataset_keys = sorted(set(dataset_keys_used))
+    unique_layouts = sorted(set(layouts_used))
+    if converted_count == len(dataset_paths):
+        field_representation = "vorticity_from_velocity"
+    elif converted_count == 0:
+        field_representation = "scalar_from_dataset"
+    else:
+        field_representation = "mixed"
+
     metadata = {
         "dataset": "pdebench_hdf5",
-        "file_path": str(dataset_path.resolve()),
-        "dataset_key": dataset_key,
-        "layout": _resolve_layout(raw.ndim, source_cfg.layout),
-        "raw_shape": tuple(int(dim) for dim in raw.shape),
-        "loaded_shape": tuple(int(dim) for dim in trajectories.shape),
-        "field_representation": "vorticity_from_velocity" if converted_from_velocity else "scalar_from_dataset",
-        "converted_from_velocity": bool(converted_from_velocity),
-        "vorticity_formula": "omega = dv/dx - du/dy" if converted_from_velocity else None,
-        "velocity_channels_used": [0, 1] if converted_from_velocity else None,
-        "vorticity_domain": {"Lx": float(config.Lx), "Ly": float(config.Ly)} if converted_from_velocity else None,
+        "file_path": str(dataset_paths[0].resolve()) if dataset_paths else "",
+        "file_paths": [str(path.resolve()) for path in dataset_paths],
+        "n_files": len(dataset_paths),
+        "dataset_key": unique_dataset_keys[0] if len(unique_dataset_keys) == 1 else unique_dataset_keys,
+        "layout": unique_layouts[0] if len(unique_layouts) == 1 else unique_layouts,
+        "per_file_shapes": per_file_shapes,
+        "field_representation": field_representation,
+        "converted_from_velocity": bool(converted_count > 0),
+        "vorticity_formula": "omega = dv/dx - du/dy" if converted_count > 0 else None,
+        "velocity_channels_used": [0, 1] if converted_count > 0 else None,
+        "vorticity_domain": {"Lx": float(config.Lx), "Ly": float(config.Ly)} if converted_count > 0 else None,
         "storage": "eager_host_memory",
+        "n_total_loaded": total_samples,
         "n_train_loaded": len(train_trajectories),
         "n_test_loaded": len(test_trajectories),
     }
     return train_trajectories, test_trajectories, dt, metadata
+
+
+def _resolve_pdebench_input_paths(source_cfg: PDEBenchSourceConfig) -> List[Path]:
+    file_specs: List[str] = []
+    primary = str(source_cfg.file_path).strip()
+    if primary:
+        file_specs.append(primary)
+    file_specs.extend(_as_string_list(source_cfg.file_paths))
+    file_specs = [spec for spec in file_specs if spec]
+    if not file_specs:
+        raise ValueError(
+            "No PDEBench files configured. Set data.external.pdebench.file_path, "
+            "or provide a list/glob via data.external.pdebench.file_paths."
+        )
+
+    resolved: List[Path] = []
+    seen: set[str] = set()
+    unmatched_globs: List[str] = []
+    for spec in file_specs:
+        expanded = str(Path(spec).expanduser())
+        if any(ch in expanded for ch in ("*", "?", "[")):
+            matches = sorted(glob.glob(expanded))
+            if not matches:
+                unmatched_globs.append(spec)
+                continue
+        else:
+            matches = [expanded]
+
+        for match in matches:
+            path = Path(match).expanduser()
+            if not path.exists():
+                raise FileNotFoundError(f"PDEBench file not found: {path}")
+            if not path.is_file():
+                raise FileNotFoundError(f"PDEBench path is not a file: {path}")
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append(path)
+
+    if not resolved:
+        if unmatched_globs:
+            raise FileNotFoundError(
+                "No PDEBench files resolved. Unmatched glob(s): " + ", ".join(unmatched_globs)
+            )
+        raise FileNotFoundError("No PDEBench files resolved from configured paths/globs.")
+    return resolved
 
 
 def _extract_xy_batch(batch: Any) -> Tuple[Any, Any]:
@@ -662,3 +733,20 @@ def _as_optional_float(value: Any) -> float | None:
     if isinstance(value, str) and not value.strip():
         return None
     return float(value)
+
+
+def _as_string_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, Sequence):
+        values: List[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                values.append(text)
+        return values
+    text = str(value).strip()
+    return [text] if text else []

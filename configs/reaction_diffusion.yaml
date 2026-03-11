@@ -15,15 +15,15 @@ time:
   n_snapshots: 101
   dt: 0.04999995231628418
 data:
-  n_train_trajectories: 16
-  n_test_trajectories: 3
+  n_train_trajectories: 700
+  n_test_trajectories: 150
   initial_condition: center_square
   initial_square_size: 20
   initial_noise_amplitude: 0.01
   external:
     source: pdebench
     pdebench:
-      file_path: /home/djm3622/Residual-Spectrum-Diagnostic/external_data/pdebench/2D/diffusion-reaction/2D_diff-react_NA_NA_64.h5
+      file_path: external_data/pdebench/2D/diffusion-reaction/2D_diff-react_NA_NA_64.h5
       dataset_key: data
       layout: THWC
       channel_index: 0
@@ -47,8 +47,8 @@ data:
       missing_physics:
       - F
       time_stride: 1
-      n_train: 16
-      n_test: 3
+      n_train: 700
+      n_test: 150
       shuffle: true
       split_seed_offset: 1207
       u_channel_index: 0
@@ -63,7 +63,7 @@ training:
   grad_clip: 1.0
   rollout_horizon: 10
   rollout_weight: 0.8
-  validation_fraction: 0.15
+  validation_fraction: 0.2
   u_weight: 1.5
   v_weight: 1.0
   channel_balance_cap: 3.0
