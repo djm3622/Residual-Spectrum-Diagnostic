@@ -5,3 +5,4 @@ PyYAML
 torch
 tqdm
 neuraloperator
+h5py

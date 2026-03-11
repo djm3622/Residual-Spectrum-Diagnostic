@@ -61,6 +61,7 @@ Each YAML controls all run parameters, including:
 - PDE physics constants
 - time integration
 - train/test trajectory counts
+- data source selection (`data.external.source`: `generated`, `neuraloperator`, `pdebench`)
 - training hyperparameters (`noise_level`, `lr`, `n_iter`, `batch_size`, `grad_clip`)
 - rollout-stability controls (`training.rollout_horizon`, `training.rollout_weight`)
 - validation monitoring split (`training.validation_fraction`) used only for progress reporting
@@ -75,6 +76,18 @@ Each YAML controls all run parameters, including:
 - RSD projection basis (`rsd.basis`: `fourier`, `laplace`, `wavelet`, `svd`) and band settings (`omega_1_frac`, `omega_2_frac`)
 - output/checkpoint roots and artifact toggles
 - fit-visualization indices (`eval_pair_index`, `test_case_index`, `test_step_index`)
+
+### External Navier-Stokes Data
+
+`runs/run_navier_stokes.py` supports three sources through `data.external`:
+- `generated`: default pseudo-spectral solver trajectories (current behavior).
+- `neuraloperator`: uses `neuralop.data.datasets.load_navier_stokes_pt(...)`.
+- `pdebench`: reads local PDEBench HDF5 trajectories (for example, `tensor` datasets).
+
+Notes:
+- NeuralOperator PT data is one-step-oriented; the runner constructs short trajectories from each batch sample's `x/y` pair.
+- PDEBench mode expects a local HDF5 file path (`data.external.pdebench.file_path`) and supports layout mapping via `data.external.pdebench.layout` (`AUTO`, `NTHW`, `NTHWC`, etc.).
+- In all modes, noisy training data is now explicitly corrupted in memory (HF spectral noise injection) before fitting the noisy model.
 
 ### Device Selection
 

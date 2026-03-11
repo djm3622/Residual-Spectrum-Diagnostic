@@ -31,6 +31,34 @@ data:
   initial_target_rms: 0.0
   line_axis: diagonal_pos
   line_amplitude: 0.05
+  external:
+    source: generated
+    neuraloperator:
+      data_path: external_data/neuraloperator
+      train_resolution: 64
+      test_resolution: 64
+      n_train: 0
+      n_test: 0
+      batch_size: 32
+      test_batch_size: 32
+      positional_encoding: true
+      encode_input: false
+      encode_output: false
+      channel_dim: 1
+      channel_index: 0
+      dt: null
+    pdebench:
+      file_path: ""
+      dataset_key: tensor
+      layout: AUTO
+      channel_index: 0
+      time_stride: 1
+      spatial_stride: 1
+      n_train: 0
+      n_test: 0
+      shuffle: true
+      split_seed_offset: 1207
+      dt: null
 
 training:
   device: mps

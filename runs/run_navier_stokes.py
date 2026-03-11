@@ -18,7 +18,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.navier_stokes import NSConfig, NavierStokes2D
+from data.navier_stokes import NSConfig
+from data.navier_stokes_external import (
+    ExternalNavierStokesDataConfig,
+    external_data_config_from_yaml,
+    load_navier_stokes_trajectory_data,
+)
 from models.navier_stokes import LOSS_CHOICES, build_model, normalize_loss_name, rollout_2d
 from utils.config import load_yaml_config
 from utils.diagnostics import BASIS_CHOICES, NavierStokesRSDAnalyzer, normalize_basis_name
@@ -45,6 +50,7 @@ def run_single_seed(
     loss: str = "combined",
     basis: str = "fourier",
     operator_config: Mapping[str, Any] | None = None,
+    external_data_cfg: ExternalNavierStokesDataConfig | None = None,
     eval_pair_index: int = 0,
     test_case_index: int = 0,
     test_step_index: int = 0,
@@ -53,24 +59,21 @@ def run_single_seed(
     show_data_progress: bool = False,
     show_training_progress: bool = False,
     show_eval_progress: bool = False,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """Train/evaluate clean and noisy models for one seed."""
     np.random.seed(seed * 1000)
-
-    solver = NavierStokes2D(config)
     rsd = NavierStokesRSDAnalyzer(config, basis=basis)
-
-    train_trajectories: List[np.ndarray] = []
-    for idx in progress_iter(
-        range(config.n_train_trajectories),
-        enabled=show_data_progress,
-        desc="Data gen (train)",
-        total=config.n_train_trajectories,
-    ):
-        omega0 = solver.sample_initial_condition(seed=seed * 1000 + idx, index=idx)
-        t_save, omega_traj = solver.solve(omega0, config.t_final, config.n_snapshots)
-        train_trajectories.append(omega_traj)
-    dt = float(t_save[1] - t_save[0])
+    resolved_external_cfg = external_data_cfg or ExternalNavierStokesDataConfig(source="generated")
+    data_bundle = load_navier_stokes_trajectory_data(
+        config,
+        resolved_external_cfg,
+        seed=seed,
+        show_data_progress=show_data_progress,
+    )
+    train_trajectories: List[np.ndarray] = data_bundle.train_trajectories
+    test_trajectories: List[np.ndarray] = data_bundle.test_trajectories
+    dt = float(data_bundle.dt)
+    n_snapshots = int(data_bundle.n_snapshots)
 
     val_fraction = float(np.clip(config.train_validation_fraction, 0.0, 0.95))
     n_train_traj_total = len(train_trajectories)
@@ -87,17 +90,10 @@ def run_single_seed(
     if not fit_trajectories:
         fit_trajectories = train_trajectories
         val_trajectories = []
-
-    test_cases = []
-    for idx in progress_iter(
-        range(config.n_test_trajectories),
-        enabled=show_data_progress,
-        desc="Data gen (test)",
-        total=config.n_test_trajectories,
-    ):
-        omega0 = solver.sample_initial_condition(seed=seed * 1000 + 500 + idx, index=10_000 + idx)
-        _, omega_true = solver.solve(omega0, config.t_final, config.n_snapshots)
-        test_cases.append({"omega0": omega0, "omega_true": omega_true})
+    test_cases = [
+        {"omega0": traj[0], "omega_true": traj}
+        for traj in test_trajectories
+    ]
 
     if trajectory_case_indices:
         requested_cases = [int(idx) for idx in trajectory_case_indices]
@@ -116,22 +112,25 @@ def run_single_seed(
     if trajectory_step_indices:
         requested_steps = [int(step) for step in trajectory_step_indices]
     else:
-        requested_steps = [0, config.n_snapshots // 4, config.n_snapshots // 2, (3 * config.n_snapshots) // 4, config.n_snapshots - 1]
+        requested_steps = [0, n_snapshots // 4, n_snapshots // 2, (3 * n_snapshots) // 4, n_snapshots - 1]
     valid_trajectory_steps = sorted(
         {
-            int(np.clip(step, 0, config.n_snapshots - 1))
+            int(np.clip(step, 0, n_snapshots - 1))
             for step in requested_steps
         }
     )
     if not valid_trajectory_steps:
-        valid_trajectory_steps = [0, config.n_snapshots - 1]
+        valid_trajectory_steps = [0, n_snapshots - 1]
 
     inputs = []
+    inputs_noisy = []
     targets_clean = []
     targets_noisy = []
     val_inputs = []
+    val_inputs_noisy = []
     val_targets_clean = []
     val_targets_noisy = []
+    fit_trajectories_noisy: List[np.ndarray] = []
 
     for trajectory in progress_iter(
         fit_trajectories,
@@ -139,34 +138,48 @@ def run_single_seed(
         desc="Build train pairs",
         total=len(fit_trajectories),
     ):
-        for step in range(len(trajectory) - 1):
-            inputs.append(trajectory[step])
-            targets_clean.append(trajectory[step + 1])
-            targets_noisy.append(
+        traj = np.asarray(trajectory, dtype=np.float32)
+        traj_noisy = np.empty_like(traj, dtype=np.float32)
+        for step in range(len(traj)):
+            traj_noisy[step] = np.asarray(
                 add_hf_noise_2d(
-                    trajectory[step + 1],
+                    traj[step],
                     config.noise_level,
                     config.nx,
                     config.ny,
                     Lx=config.Lx,
                     Ly=config.Ly,
-                )
+                ),
+                dtype=np.float32,
             )
+        fit_trajectories_noisy.append(traj_noisy)
+
+        for step in range(len(trajectory) - 1):
+            inputs.append(traj[step])
+            inputs_noisy.append(traj_noisy[step])
+            targets_clean.append(traj[step + 1])
+            targets_noisy.append(traj_noisy[step + 1])
 
     for trajectory in val_trajectories:
-        for step in range(len(trajectory) - 1):
-            val_inputs.append(trajectory[step])
-            val_targets_clean.append(trajectory[step + 1])
-            val_targets_noisy.append(
+        traj = np.asarray(trajectory, dtype=np.float32)
+        traj_noisy = np.empty_like(traj, dtype=np.float32)
+        for step in range(len(traj)):
+            traj_noisy[step] = np.asarray(
                 add_hf_noise_2d(
-                    trajectory[step + 1],
+                    traj[step],
                     config.noise_level,
                     config.nx,
                     config.ny,
                     Lx=config.Lx,
                     Ly=config.Ly,
-                )
+                ),
+                dtype=np.float32,
             )
+        for step in range(len(trajectory) - 1):
+            val_inputs.append(traj[step])
+            val_inputs_noisy.append(traj_noisy[step])
+            val_targets_clean.append(traj[step + 1])
+            val_targets_noisy.append(traj_noisy[step + 1])
 
     model_clean = build_model(
         method,
@@ -207,16 +220,16 @@ def run_single_seed(
         progress_desc="Training clean model",
     )
     model_noisy.train(
-        inputs,
+        inputs_noisy,
         targets_noisy,
         lr=config.train_lr,
         n_iter=config.train_iterations,
         batch_size=config.train_batch_size,
         grad_clip=config.train_grad_clip,
-        trajectory=fit_trajectories,
+        trajectory=fit_trajectories_noisy,
         rollout_horizon=config.train_rollout_horizon,
         rollout_weight=config.train_rollout_weight,
-        val_inputs=val_inputs,
+        val_inputs=val_inputs_noisy,
         val_targets=val_targets_noisy,
         show_progress=show_training_progress,
         progress_desc="Training noisy model",
@@ -240,8 +253,8 @@ def run_single_seed(
             total=len(test_cases),
         )
     ):
-        omega_clean = rollout_2d(model_clean, case["omega0"], config.n_snapshots)
-        omega_noisy = rollout_2d(model_noisy, case["omega0"], config.n_snapshots)
+        omega_clean = rollout_2d(model_clean, case["omega0"], n_snapshots)
+        omega_noisy = rollout_2d(model_noisy, case["omega0"], n_snapshots)
 
         if case_idx in trajectory_case_set:
             trajectory_rows.append(
@@ -317,6 +330,10 @@ def run_single_seed(
         "_checkpoint_clean": model_clean.state_dict(),
         "_checkpoint_noisy": model_noisy.state_dict(),
         "_resolved_device": str(model_clean.device),
+        "_data_source": data_bundle.source,
+        "_data_metadata": data_bundle.metadata,
+        "_dt": dt,
+        "_n_snapshots": n_snapshots,
     }
 
 
@@ -360,6 +377,7 @@ def main() -> None:
 
     raw_config = load_yaml_config(args.config_yaml)
     config = NSConfig.from_yaml(raw_config)
+    external_data_cfg = external_data_config_from_yaml(raw_config)
 
     paths = raw_config.get("paths", {})
     output_root = paths.get("output_dir", "output")
@@ -409,6 +427,7 @@ def main() -> None:
         loss=requested_loss,
         basis=requested_basis,
         operator_config=operator_config,
+        external_data_cfg=external_data_cfg,
         eval_pair_index=eval_pair_index,
         test_case_index=test_case_index,
         test_step_index=test_step_index,
@@ -423,6 +442,10 @@ def main() -> None:
     checkpoint_noisy = results.pop("_checkpoint_noisy")
     viz_payload = results.pop("_viz")
     resolved_device = results.pop("_resolved_device")
+    data_source = results.pop("_data_source")
+    data_metadata = results.pop("_data_metadata")
+    dt = float(results.pop("_dt"))
+    n_snapshots = int(results.pop("_n_snapshots"))
 
     save_checkpoint(run_ckpt_dir / "model_clean.npz", checkpoint_clean)
     save_checkpoint(run_ckpt_dir / "model_noisy.npz", checkpoint_noisy)
@@ -436,6 +459,10 @@ def main() -> None:
         "device_resolved": resolved_device,
         "loss": requested_loss,
         "basis": requested_basis,
+        "data_source": data_source,
+        "data_metadata": data_metadata,
+        "dt": dt,
+        "n_snapshots": n_snapshots,
         "metrics": results,
         "viz_indices": viz_payload["indices"],
     }
