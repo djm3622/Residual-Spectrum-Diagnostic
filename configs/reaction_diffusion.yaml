@@ -42,11 +42,12 @@ training:
   dynamics_weight: 0.2
   early_step_bias: 1.0
   early_step_decay: 24.0
+  
   neural_operator:
     common:
       n_modes: [20, 20]
-      hidden_channels: 80
-      n_layers: 6
+      hidden_channels: 32
+      n_layers: 4
       lifting_channel_ratio: 2.0
       projection_channel_ratio: 2.0
       use_channel_mlp: true
@@ -63,8 +64,8 @@ training:
       factorization: Tucker
       rank: 0.2
     uno:
-      hidden_channels: 80
-      n_layers: 5
+      hidden_channels: 32
+      n_layers: 4
       lifting_channels: 224
       projection_channels: 224
       channel_mlp_skip: linear
