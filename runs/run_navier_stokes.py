@@ -42,6 +42,79 @@ def _safe_mean(values: List[float]) -> float:
     return float(np.mean(finite))
 
 
+def _normalize_method_name(method: str) -> str:
+    return str(method).strip().lower().replace("-", "_")
+
+
+def _resolve_temporal_training_config(method: str, operator_config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    normalized_method = _normalize_method_name(method)
+    if normalized_method not in {"fno", "tfno", "uno", "neuralop_fno", "neuralop_tfno", "neuralop_uno", "operator_fno", "operator_tfno", "operator_uno"}:
+        return {"enabled": False, "input_steps": 1, "target_mode": "shifted"}
+
+    if not isinstance(operator_config, Mapping):
+        return {"enabled": False, "input_steps": 1, "target_mode": "shifted"}
+
+    common = operator_config.get("common", {})
+    specific_key = "fno"
+    if "tfno" in normalized_method:
+        specific_key = "tfno"
+    elif "uno" in normalized_method:
+        specific_key = "uno"
+
+    merged: Dict[str, Any] = {}
+    if isinstance(common, Mapping):
+        merged.update(common)
+    specific = operator_config.get(specific_key, {})
+    if isinstance(specific, Mapping):
+        merged.update(specific)
+
+    temporal = merged.get("temporal", {})
+    if not isinstance(temporal, Mapping):
+        return {"enabled": False, "input_steps": 1, "target_mode": "shifted"}
+
+    enabled = bool(temporal.get("enabled", False))
+    input_steps = max(2, int(temporal.get("input_steps", 20))) if enabled else 1
+    target_mode = str(temporal.get("target_mode", "shifted")).strip().lower().replace("-", "_")
+    if target_mode not in {"shifted", "next_block"}:
+        target_mode = "shifted"
+    return {"enabled": enabled, "input_steps": input_steps, "target_mode": target_mode}
+
+
+def _window_start_indices(n_steps: int, window: int, target_mode: str) -> range:
+    if target_mode == "next_block":
+        max_start = n_steps - (2 * window)
+    else:
+        max_start = n_steps - window - 1
+    if max_start < 0:
+        return range(0, 0)
+    return range(0, max_start + 1)
+
+
+def _window_target_start(start: int, window: int, target_mode: str) -> int:
+    if target_mode == "next_block":
+        return start + window
+    return start + 1
+
+
+def _extract_panel_frames(
+    input_window: np.ndarray,
+    target_window: np.ndarray,
+    pred_window: np.ndarray,
+    target_mode: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if target_mode == "next_block":
+        return (
+            np.asarray(input_window[-1], dtype=np.float32),
+            np.asarray(target_window[0], dtype=np.float32),
+            np.asarray(pred_window[0], dtype=np.float32),
+        )
+    return (
+        np.asarray(input_window[-1], dtype=np.float32),
+        np.asarray(target_window[-1], dtype=np.float32),
+        np.asarray(pred_window[-1], dtype=np.float32),
+    )
+
+
 def run_single_seed(
     config: NSConfig,
     method: str,
@@ -74,6 +147,10 @@ def run_single_seed(
     test_trajectories: List[np.ndarray] = data_bundle.test_trajectories
     dt = float(data_bundle.dt)
     n_snapshots = int(data_bundle.n_snapshots)
+    temporal_cfg = _resolve_temporal_training_config(method, operator_config)
+    temporal_enabled = bool(temporal_cfg["enabled"])
+    temporal_window = int(temporal_cfg["input_steps"])
+    temporal_target_mode = str(temporal_cfg["target_mode"])
 
     val_fraction = float(np.clip(config.train_validation_fraction, 0.0, 0.95))
     n_train_traj_total = len(train_trajectories)
@@ -154,11 +231,21 @@ def run_single_seed(
             )
         fit_trajectories_noisy.append(traj_noisy)
 
-        for step in range(len(trajectory) - 1):
-            inputs.append(traj[step])
-            inputs_noisy.append(traj_noisy[step])
-            targets_clean.append(traj[step + 1])
-            targets_noisy.append(traj_noisy[step + 1])
+        if temporal_enabled:
+            for start in _window_start_indices(len(traj), temporal_window, temporal_target_mode):
+                target_start = _window_target_start(start, temporal_window, temporal_target_mode)
+                inputs.append(np.asarray(traj[start : start + temporal_window], dtype=np.float32))
+                inputs_noisy.append(np.asarray(traj_noisy[start : start + temporal_window], dtype=np.float32))
+                targets_clean.append(np.asarray(traj[target_start : target_start + temporal_window], dtype=np.float32))
+                targets_noisy.append(
+                    np.asarray(traj_noisy[target_start : target_start + temporal_window], dtype=np.float32)
+                )
+        else:
+            for step in range(len(trajectory) - 1):
+                inputs.append(traj[step])
+                inputs_noisy.append(traj_noisy[step])
+                targets_clean.append(traj[step + 1])
+                targets_noisy.append(traj_noisy[step + 1])
 
     for trajectory in val_trajectories:
         traj = np.asarray(trajectory, dtype=np.float32)
@@ -175,11 +262,30 @@ def run_single_seed(
                 ),
                 dtype=np.float32,
             )
-        for step in range(len(trajectory) - 1):
-            val_inputs.append(traj[step])
-            val_inputs_noisy.append(traj_noisy[step])
-            val_targets_clean.append(traj[step + 1])
-            val_targets_noisy.append(traj_noisy[step + 1])
+        if temporal_enabled:
+            for start in _window_start_indices(len(traj), temporal_window, temporal_target_mode):
+                target_start = _window_target_start(start, temporal_window, temporal_target_mode)
+                val_inputs.append(np.asarray(traj[start : start + temporal_window], dtype=np.float32))
+                val_inputs_noisy.append(np.asarray(traj_noisy[start : start + temporal_window], dtype=np.float32))
+                val_targets_clean.append(
+                    np.asarray(traj[target_start : target_start + temporal_window], dtype=np.float32)
+                )
+                val_targets_noisy.append(
+                    np.asarray(traj_noisy[target_start : target_start + temporal_window], dtype=np.float32)
+                )
+        else:
+            for step in range(len(trajectory) - 1):
+                val_inputs.append(traj[step])
+                val_inputs_noisy.append(traj_noisy[step])
+                val_targets_clean.append(traj[step + 1])
+                val_targets_noisy.append(traj_noisy[step + 1])
+
+    if not inputs:
+        raise ValueError(
+            "No training pairs were generated. "
+            f"temporal_enabled={temporal_enabled}, temporal_window={temporal_window}, "
+            f"n_snapshots={n_snapshots}"
+        )
 
     model_clean = build_model(
         method,
@@ -253,8 +359,8 @@ def run_single_seed(
             total=len(test_cases),
         )
     ):
-        omega_clean = rollout_2d(model_clean, case["omega0"], n_snapshots)
-        omega_noisy = rollout_2d(model_noisy, case["omega0"], n_snapshots)
+        omega_clean = rollout_2d(model_clean, case["omega0"], n_snapshots, context=case["omega_true"])
+        omega_noisy = rollout_2d(model_noisy, case["omega0"], n_snapshots, context=case["omega_true"])
 
         if case_idx in trajectory_case_set:
             trajectory_rows.append(
@@ -287,18 +393,71 @@ def run_single_seed(
     eval_pair_index = int(np.clip(eval_pair_index, 0, len(inputs) - 1))
     test_case_index = int(np.clip(test_case_index, 0, len(test_cases) - 1))
     test_case = test_cases[test_case_index]
-    max_test_step = test_case["omega_true"].shape[0] - 2
-    test_step_index = int(np.clip(test_step_index, 0, max_test_step))
+    if temporal_enabled:
+        eval_input_window = np.asarray(inputs[eval_pair_index], dtype=np.float32)
+        eval_target_window = np.asarray(targets_clean[eval_pair_index], dtype=np.float32)
+        eval_pred_window_clean = np.asarray(model_clean.predict_window(eval_input_window), dtype=np.float32)
+        eval_pred_window_noisy = np.asarray(model_noisy.predict_window(eval_input_window), dtype=np.float32)
+        eval_input, eval_target, eval_pred_clean = _extract_panel_frames(
+            eval_input_window,
+            eval_target_window,
+            eval_pred_window_clean,
+            temporal_target_mode,
+        )
+        _, _, eval_pred_noisy = _extract_panel_frames(
+            eval_input_window,
+            eval_target_window,
+            eval_pred_window_noisy,
+            temporal_target_mode,
+        )
 
-    eval_input = inputs[eval_pair_index]
-    eval_target = targets_clean[eval_pair_index]
-    eval_pred_clean = model_clean.forward(eval_input)
-    eval_pred_noisy = model_noisy.forward(eval_input)
+        test_start_candidates = list(
+            _window_start_indices(test_case["omega_true"].shape[0], temporal_window, temporal_target_mode)
+        )
+        if not test_start_candidates:
+            raise ValueError(
+                "Temporal evaluation requested but test trajectory is too short for configured window: "
+                f"n_steps={test_case['omega_true'].shape[0]}, window={temporal_window}, "
+                f"target_mode={temporal_target_mode}"
+            )
+        max_test_step = max(test_start_candidates)
+        test_step_index = int(np.clip(test_step_index, 0, max_test_step))
+        target_start = _window_target_start(test_step_index, temporal_window, temporal_target_mode)
+        test_input_window = np.asarray(
+            test_case["omega_true"][test_step_index : test_step_index + temporal_window],
+            dtype=np.float32,
+        )
+        test_target_window = np.asarray(
+            test_case["omega_true"][target_start : target_start + temporal_window],
+            dtype=np.float32,
+        )
+        test_pred_window_clean = np.asarray(model_clean.predict_window(test_input_window), dtype=np.float32)
+        test_pred_window_noisy = np.asarray(model_noisy.predict_window(test_input_window), dtype=np.float32)
+        test_input, test_target, test_pred_clean = _extract_panel_frames(
+            test_input_window,
+            test_target_window,
+            test_pred_window_clean,
+            temporal_target_mode,
+        )
+        _, _, test_pred_noisy = _extract_panel_frames(
+            test_input_window,
+            test_target_window,
+            test_pred_window_noisy,
+            temporal_target_mode,
+        )
+    else:
+        max_test_step = test_case["omega_true"].shape[0] - 2
+        test_step_index = int(np.clip(test_step_index, 0, max_test_step))
 
-    test_input = test_case["omega_true"][test_step_index]
-    test_target = test_case["omega_true"][test_step_index + 1]
-    test_pred_clean = model_clean.forward(test_input)
-    test_pred_noisy = model_noisy.forward(test_input)
+        eval_input = inputs[eval_pair_index]
+        eval_target = targets_clean[eval_pair_index]
+        eval_pred_clean = model_clean.forward(eval_input)
+        eval_pred_noisy = model_noisy.forward(eval_input)
+
+        test_input = test_case["omega_true"][test_step_index]
+        test_target = test_case["omega_true"][test_step_index + 1]
+        test_pred_clean = model_clean.forward(test_input)
+        test_pred_noisy = model_noisy.forward(test_input)
 
     mean_metrics = {key: _safe_mean(value) for key, value in metrics.items()}
     return {

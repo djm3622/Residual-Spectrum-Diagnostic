@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import inspect
 from contextlib import redirect_stdout
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch.nn as nn
@@ -144,11 +144,19 @@ def build_fno_like_model(
     nx: int,
     ny: int,
     config: Dict[str, Any],
+    n_modes_override: Optional[Sequence[int]] = None,
 ) -> nn.Module:
     """Construct an FNO/TFNO/UNO model from merged config."""
     require_neuralop()
 
     modes_x, modes_y = _resolve_modes_2d(config.get("n_modes"), nx=nx, ny=ny, default=20)
+    if n_modes_override is None:
+        n_modes = (modes_x, modes_y)
+    else:
+        if len(n_modes_override) < 2:
+            raise ValueError("n_modes_override must contain at least two dimensions.")
+        n_modes = tuple(max(2, int(mode)) for mode in n_modes_override)
+
     hidden_channels = max(16, int(config.get("hidden_channels", 64)))
     domain_padding = _normalize_optional_name(config.get("domain_padding", 0.0))
     norm = _normalize_optional_name(config.get("norm"))
@@ -168,7 +176,7 @@ def build_fno_like_model(
 
     if operator == "fno":
         fno_kwargs: Dict[str, Any] = dict(
-            n_modes=(modes_x, modes_y),
+            n_modes=n_modes,
             in_channels=in_channels,
             out_channels=out_channels,
             hidden_channels=hidden_channels,
@@ -197,7 +205,7 @@ def build_fno_like_model(
 
     if operator == "tfno":
         tfno_kwargs: Dict[str, Any] = dict(
-            n_modes=(modes_x, modes_y),
+            n_modes=n_modes,
             in_channels=in_channels,
             out_channels=out_channels,
             hidden_channels=hidden_channels,
@@ -225,6 +233,8 @@ def build_fno_like_model(
         return TFNO(**_filtered_ctor_kwargs(TFNO, tfno_kwargs))
 
     if operator == "uno":
+        if len(n_modes) != 2:
+            raise ValueError("UNO currently supports only 2D inputs in this project.")
         n_layers = max(2, int(config.get("n_layers", 5)))
         uno_channel_mlp_skip = str(config.get("channel_mlp_skip", "linear"))
         uno_out_channels = config.get("uno_out_channels")

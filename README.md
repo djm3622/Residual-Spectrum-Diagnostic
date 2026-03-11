@@ -70,6 +70,8 @@ Each YAML controls all run parameters, including:
 - model capacity controls for NS conv surrogate (`training.model_width`, `training.model_depth`)
 - neural-operator controls (`training.neural_operator.common` and per-operator overrides in
   `training.neural_operator.fno`, `training.neural_operator.tfno`, `training.neural_operator.uno`)
+  - optional temporal-window mode for FNO/TFNO via `training.neural_operator.<op>.temporal`:
+    `enabled`, `input_steps`, `output_steps` (must equal `input_steps`), `target_mode` (`shifted` or `next_block`), `n_modes_time`
 - training objective (`training.loss`: `combined`, `l2`, `l1`, `spectral_decay`, `energy`)
 - progress bars (`progress.enabled`, `progress.data_generation`, `progress.training`, `progress.evaluation`)
   - when training progress is enabled, tqdm shows `train_loss` and `val_loss` live

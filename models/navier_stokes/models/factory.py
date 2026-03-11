@@ -12,8 +12,23 @@ from .convolutional_surrogate import ConvolutionalSurrogate2D
 from .neural_operator_surrogate import NeuralOperatorSurrogate2D
 
 
-def rollout_2d(model: OneStepModel, omega0: np.ndarray, n_steps: int) -> np.ndarray:
+def rollout_2d(
+    model: OneStepModel,
+    omega0: np.ndarray,
+    n_steps: int,
+    context: np.ndarray | None = None,
+) -> np.ndarray:
     """Autoregressive rollout for one-step models."""
+    rollout_fn = getattr(model, "rollout", None)
+    if callable(rollout_fn):
+        try:
+            return np.asarray(
+                rollout_fn(omega0, n_steps, context=context),
+                dtype=np.float32,
+            )
+        except TypeError:
+            return np.asarray(rollout_fn(omega0, n_steps), dtype=np.float32)
+
     nx, ny = omega0.shape
     trajectory = np.zeros((n_steps, nx, ny), dtype=np.float32)
     trajectory[0] = np.asarray(omega0, dtype=np.float32)

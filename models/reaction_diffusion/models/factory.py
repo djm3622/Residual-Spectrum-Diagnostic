@@ -20,8 +20,18 @@ def rollout_coupled(
     u0: np.ndarray,
     v0: np.ndarray,
     n_steps: int,
+    context_u: np.ndarray | None = None,
+    context_v: np.ndarray | None = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Autoregressive rollout for coupled one-step models."""
+    rollout_fn = getattr(model, "rollout", None)
+    if callable(rollout_fn):
+        try:
+            pred_u, pred_v = rollout_fn(u0, v0, n_steps, context_u=context_u, context_v=context_v)
+        except TypeError:
+            pred_u, pred_v = rollout_fn(u0, v0, n_steps)
+        return np.asarray(pred_u, dtype=np.float32), np.asarray(pred_v, dtype=np.float32)
+
     nx, ny = u0.shape
     u_traj = np.zeros((n_steps, nx, ny), dtype=np.float32)
     v_traj = np.zeros((n_steps, nx, ny), dtype=np.float32)

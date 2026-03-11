@@ -110,17 +110,21 @@ class ObjectiveLoss:
         return F.mse_loss(pred_energy, target_energy) + 0.5 * F.mse_loss(pred_grad_energy, target_grad_energy)
 
     def __call__(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        l2 = F.mse_loss(pred, target)
+        # Keep objective math in float32 even when model forward uses autocast.
+        pred_f32 = pred.to(torch.float32)
+        target_f32 = target.to(torch.float32)
+
+        l2 = F.mse_loss(pred_f32, target_f32)
 
         if self.loss_name == "combined":
-            return self._combined_loss(pred, target)
+            return self._combined_loss(pred_f32, target_f32)
         if self.loss_name == "l2":
             return l2
         if self.loss_name == "l1":
-            return F.l1_loss(pred, target)
+            return F.l1_loss(pred_f32, target_f32)
         if self.loss_name == "spectral_decay":
-            return l2 + 0.2 * self._spectral_decay_loss(pred, target)
+            return l2 + 0.2 * self._spectral_decay_loss(pred_f32, target_f32)
         if self.loss_name == "energy":
-            return l2 + 0.2 * self._energy_loss(pred, target)
+            return l2 + 0.2 * self._energy_loss(pred_f32, target_f32)
 
         raise RuntimeError(f"Unknown loss objective '{self.loss_name}'")

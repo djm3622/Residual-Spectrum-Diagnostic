@@ -54,7 +54,7 @@ data:
       u_channel_index: 0
       v_channel_index: 1
 training:
-  device: mps
+  device: cuda
   loss: combined
   noise_level: 0.03
   lr: 0.0007
@@ -94,6 +94,12 @@ training:
       n_layers: 4
       factorization: Tucker
       rank: 0.2
+      temporal:
+        enabled: true
+        input_steps: 20
+        output_steps: 20
+        target_mode: next_block
+        n_modes_time: 8
     fno:
       hidden_channels: 32
       n_layers: 4
