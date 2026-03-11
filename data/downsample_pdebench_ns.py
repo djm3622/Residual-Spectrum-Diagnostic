@@ -43,6 +43,21 @@ def parse_args() -> argparse.Namespace:
         help="Temporal stride applied before writing output (default: 1).",
     )
     parser.add_argument(
+        "--min-timestep",
+        type=int,
+        default=0,
+        help="Inclusive minimum source timestep index to keep before stride (default: 0).",
+    )
+    parser.add_argument(
+        "--max-timestep",
+        type=int,
+        default=None,
+        help=(
+            "Optional inclusive max source timestep index to keep before stride "
+            "(for example, 500 keeps t=0..500)."
+        ),
+    )
+    parser.add_argument(
         "--convert-to-omega",
         type=str,
         default="auto",
@@ -304,6 +319,34 @@ def _target_len(size: int, stride: int) -> int:
     return int(math.ceil(float(size) / float(max(1, stride))))
 
 
+def _resolve_time_bounds(
+    src_nt: int,
+    min_timestep: int,
+    max_timestep: int | None,
+) -> tuple[int, int]:
+    min_idx = int(min_timestep)
+    if min_idx < 0:
+        raise ValueError(f"min_timestep must be >= 0, got {min_idx}")
+
+    if max_timestep is None:
+        max_idx = int(src_nt - 1)
+    else:
+        max_idx = int(max_timestep)
+        if max_idx < 0:
+            raise ValueError(f"max_timestep must be >= 0, got {max_idx}")
+
+    if min_idx > max_idx:
+        raise ValueError(
+            f"min_timestep ({min_idx}) must be <= max_timestep ({max_idx})."
+        )
+
+    start = int(min(min_idx, max(src_nt - 1, 0)))
+    stop = int(min(src_nt, max_idx + 1))
+    if stop <= start:
+        stop = min(src_nt, start + 1)
+    return start, stop
+
+
 def _resolve_output_key(output_key: str, src_key: str, convert_to_omega: bool) -> str:
     normalized = str(output_key).strip()
     if normalized and normalized.upper() != "AUTO":
@@ -330,6 +373,8 @@ def _process_dataset(
     target_nx: int,
     target_ny: int,
     time_stride: int,
+    min_timestep: int,
+    max_timestep: int | None,
     convert_to_omega: bool,
     Lx: float,
     Ly: float,
@@ -356,7 +401,8 @@ def _process_dataset(
 
     stride_x = src_nx // target_nx
     stride_y = src_ny // target_ny
-    target_nt = _target_len(src_nt, time_stride)
+    time_start, time_stop = _resolve_time_bounds(src_nt, min_timestep, max_timestep)
+    target_nt = _target_len(max(0, time_stop - time_start), time_stride)
 
     if convert_to_omega:
         if not has_c_axis or int(src_ds.shape[c_axis]) < 2:
@@ -391,7 +437,7 @@ def _process_dataset(
         src_sel: list[object] = [slice(None)] * src_ds.ndim
         if has_n_axis:
             src_sel[n_axis] = n_idx
-        src_sel[t_axis] = slice(None, None, time_stride)
+        src_sel[t_axis] = slice(time_start, time_stop, time_stride)
         src_sel[h_axis] = slice(None, None, stride_x)
         src_sel[w_axis] = slice(None, None, stride_y)
 
@@ -415,6 +461,9 @@ def _process_dataset(
         "source_nx": src_nx,
         "source_ny": src_ny,
         "source_nt": src_nt,
+        "source_t_start_inclusive": int(time_start),
+        "source_t_stop_exclusive": int(time_stop),
+        "source_max_timestep_inclusive": int(time_stop - 1),
         "target_nx": target_nx,
         "target_ny": target_ny,
         "target_nt": target_nt,
@@ -432,6 +481,8 @@ def _maybe_copy_time_dataset(
     dst: h5py.File,
     key: str,
     time_stride: int,
+    min_timestep: int,
+    max_timestep: int | None,
 ) -> None:
     if not key:
         return
@@ -440,11 +491,23 @@ def _maybe_copy_time_dataset(
     src_ds = src[key]
     values = np.asarray(src_ds)
     if values.ndim == 0:
+        time_start = None
+        time_stop = None
+    else:
+        time_start, time_stop = _resolve_time_bounds(
+            int(values.shape[-1]),
+            min_timestep=min_timestep,
+            max_timestep=max_timestep,
+        )
+    if values.ndim == 0:
         trimmed = values
     elif values.ndim == 1:
-        trimmed = values[::time_stride]
+        trimmed = values[time_start:time_stop:time_stride]
     else:
-        trimmed = values[(slice(None),) * (values.ndim - 1) + (slice(None, None, time_stride),)]
+        trimmed = values[
+            (slice(None),) * (values.ndim - 1)
+            + (slice(time_start, time_stop, time_stride),)
+        ]
 
     out = dst.create_dataset(key, data=trimmed, dtype=src_ds.dtype)
     _copy_dataset_attrs(src_ds, out)
@@ -569,6 +632,8 @@ def main() -> None:
     target_nx = int(args.nx)
     target_ny = int(args.ny)
     time_stride = max(1, int(args.time_stride))
+    min_timestep = max(0, int(args.min_timestep))
+    max_timestep = None if args.max_timestep is None else int(args.max_timestep)
 
     if target_nx <= 0 or target_ny <= 0:
         raise ValueError("Target nx and ny must be positive.")
@@ -606,12 +671,21 @@ def main() -> None:
             target_nx=target_nx,
             target_ny=target_ny,
             time_stride=time_stride,
+            min_timestep=min_timestep,
+            max_timestep=max_timestep,
             convert_to_omega=convert_to_omega,
             Lx=Lx,
             Ly=Ly,
             compression_kwargs=compression_kwargs,
         )
-        _maybe_copy_time_dataset(src, dst, copy_time_key, time_stride=time_stride)
+        _maybe_copy_time_dataset(
+            src,
+            dst,
+            copy_time_key,
+            time_stride=time_stride,
+            min_timestep=min_timestep,
+            max_timestep=max_timestep,
+        )
 
         dt = _infer_dt(src, source_cfg_blob=source_cfg_blob, time_key=copy_time_key, time_stride=time_stride)
         nu = _infer_nu(source_cfg_blob, src_ds=src_ds, src_file=src)
@@ -625,6 +699,9 @@ def main() -> None:
         dst.attrs["processed_target_nx"] = int(target_nx)
         dst.attrs["processed_target_ny"] = int(target_ny)
         dst.attrs["processed_time_stride"] = int(time_stride)
+        dst.attrs["processed_min_timestep"] = int(min_timestep)
+        if max_timestep is not None:
+            dst.attrs["processed_max_timestep"] = int(max_timestep)
         dst.attrs["processed_Lx"] = float(Lx)
         dst.attrs["processed_Ly"] = float(Ly)
         if dt is not None and dt > 0.0:
@@ -638,6 +715,8 @@ def main() -> None:
         "output_file": str(output_path.resolve()),
         "input_key": str(src_key),
         "output_key": str(out_key),
+        "min_timestep": min_timestep,
+        "max_timestep": max_timestep,
         "Lx": float(Lx),
         "Ly": float(Ly),
         "dt": dt,
@@ -663,6 +742,8 @@ def main() -> None:
     print(f"Source HxW: {metadata['source_nx']}x{metadata['source_ny']}")
     print(f"Target HxW: {metadata['target_nx']}x{metadata['target_ny']}")
     print(f"Source T: {metadata['source_nt']}")
+    print(f"Source min timestep kept (inclusive): {metadata['source_t_start_inclusive']}")
+    print(f"Source max timestep kept (inclusive): {metadata['source_max_timestep_inclusive']}")
     print(f"Target T: {metadata['target_nt']}")
     print(f"Sample count: {metadata['n_samples']}")
     print(f"Spatial stride: x{metadata['stride_x']}, y{metadata['stride_y']}")

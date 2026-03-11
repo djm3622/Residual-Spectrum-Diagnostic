@@ -15,8 +15,8 @@ time:
   n_snapshots: 101
   dt: 0.04999995231628418
 data:
-  n_train_trajectories: 500
-  n_test_trajectories: 150
+  n_train_trajectories: 100
+  n_test_trajectories: 10
   initial_condition: center_square
   initial_square_size: 20
   initial_noise_amplitude: 0.01
@@ -47,18 +47,18 @@ data:
       missing_physics:
       - F
       time_stride: 1
-      n_train: 500
-      n_test: 150
+      n_train: 100
+      n_test: 10
       shuffle: true
       split_seed_offset: 1207
       u_channel_index: 0
       v_channel_index: 1
 training:
   device: cuda
-  loss: combined
+  loss: l2
   noise_level: 0.03
   lr: 0.001
-  n_iter: 100
+  n_iter: 300
   batch_size: 32
   grad_clip: 1.0
   rollout_horizon: 10
@@ -76,12 +76,12 @@ training:
       - 20
       - 20
       hidden_channels: 32
-      n_layers: 4
+      n_layers: 6
       lifting_channel_ratio: 2.0
       projection_channel_ratio: 2.0
       use_channel_mlp: true
       channel_mlp_expansion: 0.75
-      channel_mlp_dropout: 0.0
+      channel_mlp_dropout: 0.15
       fno_skip: linear
       channel_mlp_skip: soft-gating
       norm: null
@@ -91,7 +91,7 @@ training:
       rank: 1.0
     tfno:
       hidden_channels: 32
-      n_layers: 4
+      n_layers: 6
       factorization: Tucker
       rank: 0.2
       temporal:

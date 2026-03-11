@@ -105,14 +105,60 @@ def _extract_panel_frames(
     if target_mode == "next_block":
         return (
             np.asarray(input_window[-1], dtype=np.float32),
-            np.asarray(target_window[0], dtype=np.float32),
-            np.asarray(pred_window[0], dtype=np.float32),
+            np.asarray(target_window[-1], dtype=np.float32),
+            np.asarray(pred_window[-1], dtype=np.float32),
         )
     return (
         np.asarray(input_window[-1], dtype=np.float32),
         np.asarray(target_window[-1], dtype=np.float32),
         np.asarray(pred_window[-1], dtype=np.float32),
     )
+
+
+def _block_future_step_indices(
+    n_snapshots: int,
+    block_size: int,
+    max_points: int = 6,
+) -> List[int]:
+    """Choose evenly interpretable future checkpoints for block-prediction models."""
+    n_steps = max(1, int(n_snapshots))
+    stride = max(1, int(block_size))
+    if n_steps == 1:
+        return [0]
+
+    steps = [0]
+    step = stride
+    while step < n_steps and len(steps) < max_points:
+        steps.append(step)
+        step += stride
+    if len(steps) < max_points and steps[-1] != n_steps - 1:
+        steps.append(n_steps - 1)
+    return sorted(set(int(np.clip(idx, 0, n_steps - 1)) for idx in steps))
+
+
+def _future_block_rel_l2(
+    pred: np.ndarray,
+    target: np.ndarray,
+    horizon: int,
+) -> float:
+    """Average relative L2 at fixed future horizons (e.g., every 20 steps)."""
+    pred_arr = np.asarray(pred, dtype=np.float32)
+    target_arr = np.asarray(target, dtype=np.float32)
+    n_steps = min(pred_arr.shape[0], target_arr.shape[0])
+    if n_steps <= 1:
+        return float("nan")
+
+    stride = max(1, int(horizon))
+    indices = list(range(stride, n_steps, stride))
+    if not indices:
+        indices = [n_steps - 1]
+
+    rel_errors: List[float] = []
+    for idx in indices:
+        numerator = float(np.linalg.norm(pred_arr[idx] - target_arr[idx]))
+        denominator = float(np.linalg.norm(target_arr[idx]) + 1e-12)
+        rel_errors.append(numerator / denominator)
+    return _safe_mean(rel_errors)
 
 
 def run_single_seed(
@@ -189,7 +235,10 @@ def run_single_seed(
     if trajectory_step_indices:
         requested_steps = [int(step) for step in trajectory_step_indices]
     else:
-        requested_steps = [0, n_snapshots // 4, n_snapshots // 2, (3 * n_snapshots) // 4, n_snapshots - 1]
+        if temporal_enabled and temporal_target_mode == "next_block":
+            requested_steps = _block_future_step_indices(n_snapshots, temporal_window, max_points=6)
+        else:
+            requested_steps = [0, n_snapshots // 4, n_snapshots // 2, (3 * n_snapshots) // 4, n_snapshots - 1]
     valid_trajectory_steps = sorted(
         {
             int(np.clip(step, 0, n_snapshots - 1))
@@ -344,11 +393,16 @@ def run_single_seed(
     metrics = {
         "clean_l2": [],
         "noisy_l2": [],
+        "clean_l2_future_block": [],
+        "noisy_l2_future_block": [],
         "clean_hfv": [],
         "noisy_hfv": [],
         "clean_lfv": [],
         "noisy_lfv": [],
     }
+    future_block_horizon = temporal_window if (temporal_enabled and temporal_target_mode == "next_block") else 1
+
+    rollout_context: int | None = temporal_window if temporal_enabled else None
 
     trajectory_rows = []
     for case_idx, case in enumerate(
@@ -359,8 +413,13 @@ def run_single_seed(
             total=len(test_cases),
         )
     ):
-        omega_clean = rollout_2d(model_clean, case["omega0"], n_snapshots, context=case["omega_true"])
-        omega_noisy = rollout_2d(model_noisy, case["omega0"], n_snapshots, context=case["omega_true"])
+        # In temporal mode, seed with the first observed window then forecast autonomously.
+        if rollout_context is not None:
+            omega_context = np.asarray(case["omega_true"][:rollout_context], dtype=np.float32)
+        else:
+            omega_context = None
+        omega_clean = rollout_2d(model_clean, case["omega0"], n_snapshots, context=omega_context)
+        omega_noisy = rollout_2d(model_noisy, case["omega0"], n_snapshots, context=omega_context)
 
         if case_idx in trajectory_case_set:
             trajectory_rows.append(
@@ -385,6 +444,12 @@ def run_single_seed(
 
         metrics["clean_l2"].append(clean_stats["l2_error"])
         metrics["noisy_l2"].append(noisy_stats["l2_error"])
+        metrics["clean_l2_future_block"].append(
+            _future_block_rel_l2(omega_clean, case["omega_true"], future_block_horizon)
+        )
+        metrics["noisy_l2_future_block"].append(
+            _future_block_rel_l2(omega_noisy, case["omega_true"], future_block_horizon)
+        )
         metrics["clean_hfv"].append(clean_stats["hfv"])
         metrics["noisy_hfv"].append(noisy_stats["hfv"])
         metrics["clean_lfv"].append(clean_stats["lfv"])

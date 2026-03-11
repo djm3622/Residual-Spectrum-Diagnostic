@@ -516,6 +516,8 @@ def run_single_seed(
         "noisy_lfv": [],
     }
 
+    rollout_context: int | None = temporal_window if temporal_enabled else None
+
     trajectory_rows = []
     for case_idx, case in enumerate(
         progress_iter(
@@ -525,21 +527,27 @@ def run_single_seed(
             total=len(test_cases),
         )
     ):
+        if rollout_context is not None:
+            u_context = np.asarray(case["u_true"][:rollout_context], dtype=np.float32)
+            v_context = np.asarray(case["v_true"][:rollout_context], dtype=np.float32)
+        else:
+            u_context = None
+            v_context = None
         u_clean, v_clean = rollout_coupled(
             model_clean,
             case["u0"],
             case["v0"],
             config.n_snapshots,
-            context_u=case["u_true"],
-            context_v=case["v_true"],
+            context_u=u_context,
+            context_v=v_context,
         )
         u_noisy, v_noisy = rollout_coupled(
             model_noisy,
             case["u0"],
             case["v0"],
             config.n_snapshots,
-            context_u=case["u_true"],
-            context_v=case["v_true"],
+            context_u=u_context,
+            context_v=v_context,
         )
 
         if case_idx in trajectory_case_set:

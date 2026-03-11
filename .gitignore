@@ -12,7 +12,8 @@ external_data/*
 
 # files
 run_all_conv_seed1_loss_basis.sh
-batch_train.sh
+batch_ns.sh
+batch_rd.sh
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
