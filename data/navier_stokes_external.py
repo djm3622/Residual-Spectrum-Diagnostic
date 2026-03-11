@@ -345,27 +345,42 @@ def _load_pdebench(
         if not dataset_key:
             dataset_key = "tensor"
         if dataset_key not in handle:
-            if dataset_key == "tensor" and "density" in handle:
-                dataset_key = "density"
+            if dataset_key == "tensor":
+                for candidate in ("velocity", "density", "particles"):
+                    if candidate in handle:
+                        dataset_key = candidate
+                        break
+                else:
+                    raise KeyError(
+                        f"Dataset key '{dataset_key}' not found in {dataset_path}. Available keys: {keys}"
+                    )
             else:
                 raise KeyError(
                     f"Dataset key '{dataset_key}' not found in {dataset_path}. Available keys: {keys}"
                 )
 
-        raw = np.asarray(handle[dataset_key], dtype=np.float32)
+        # Eagerly materialize the dataset into host memory so training does not read from disk.
+        raw = np.array(handle[dataset_key], dtype=np.float32, copy=True)
         dt_from_file = _infer_dt_from_h5(handle)
 
+    keep_channels = str(dataset_key).strip().lower() == "velocity"
     trajectories = _pdebench_array_to_trajectories(
         raw,
         layout=str(source_cfg.layout),
         channel_index=int(source_cfg.channel_index),
+        keep_channels=keep_channels,
     )
-    trajectories = trajectories[
-        :,
-        :: max(1, int(source_cfg.time_stride)),
-        :: max(1, int(source_cfg.spatial_stride)),
-        :: max(1, int(source_cfg.spatial_stride)),
-    ]
+    time_stride = max(1, int(source_cfg.time_stride))
+    spatial_stride = max(1, int(source_cfg.spatial_stride))
+    trajectories = trajectories[:, ::time_stride, ::spatial_stride, ::spatial_stride, ...]
+    converted_from_velocity = False
+    if trajectories.ndim == 5:
+        trajectories = _velocity_to_vorticity_trajectories(
+            trajectories,
+            Lx=float(config.Lx),
+            Ly=float(config.Ly),
+        )
+        converted_from_velocity = True
     if trajectories.shape[1] < 2:
         raise ValueError("PDEBench trajectories must contain at least 2 time steps.")
 
@@ -403,9 +418,9 @@ def _load_pdebench(
 
     dt_fallback = float(config.t_final / max(config.n_snapshots - 1, 1))
     if source_cfg.dt is not None:
-        dt = float(source_cfg.dt) * float(max(1, int(source_cfg.time_stride)))
+        dt = float(source_cfg.dt) * float(time_stride)
     elif dt_from_file is not None:
-        dt = float(dt_from_file) * float(max(1, int(source_cfg.time_stride)))
+        dt = float(dt_from_file) * float(time_stride)
     else:
         dt = dt_fallback
 
@@ -416,6 +431,12 @@ def _load_pdebench(
         "layout": _resolve_layout(raw.ndim, source_cfg.layout),
         "raw_shape": tuple(int(dim) for dim in raw.shape),
         "loaded_shape": tuple(int(dim) for dim in trajectories.shape),
+        "field_representation": "vorticity_from_velocity" if converted_from_velocity else "scalar_from_dataset",
+        "converted_from_velocity": bool(converted_from_velocity),
+        "vorticity_formula": "omega = dv/dx - du/dy" if converted_from_velocity else None,
+        "velocity_channels_used": [0, 1] if converted_from_velocity else None,
+        "vorticity_domain": {"Lx": float(config.Lx), "Ly": float(config.Ly)} if converted_from_velocity else None,
+        "storage": "eager_host_memory",
         "n_train_loaded": len(train_trajectories),
         "n_test_loaded": len(test_trajectories),
     }
@@ -520,7 +541,40 @@ def _match_resolution(field: np.ndarray, target_nx: int, target_ny: int) -> np.n
     )
 
 
-def _pdebench_array_to_trajectories(array: np.ndarray, layout: str, channel_index: int) -> np.ndarray:
+def _velocity_to_vorticity_trajectories(velocity_traj: np.ndarray, Lx: float, Ly: float) -> np.ndarray:
+    """Convert velocity trajectories [N, T, X, Y, C] into vorticity [N, T, X, Y]."""
+    arr = np.asarray(velocity_traj, dtype=np.float64)
+    if arr.ndim != 5 or arr.shape[-1] < 2:
+        raise ValueError(
+            "Expected velocity trajectories with shape [N, T, X, Y, C>=2], "
+            f"got {arr.shape}."
+        )
+
+    u = arr[..., 0]
+    v = arr[..., 1]
+    nx = int(u.shape[-2])
+    ny = int(u.shape[-1])
+
+    dx = float(Lx) / float(nx)
+    dy = float(Ly) / float(ny)
+    kx = np.fft.fftfreq(nx, d=dx) * 2.0 * np.pi
+    ky = np.fft.fftfreq(ny, d=dy) * 2.0 * np.pi
+    kx_grid, ky_grid = np.meshgrid(kx, ky, indexing="ij")
+
+    u_hat = np.fft.fft2(u, axes=(-2, -1))
+    v_hat = np.fft.fft2(v, axes=(-2, -1))
+    dv_dx = np.fft.ifft2((1j * kx_grid) * v_hat, axes=(-2, -1)).real
+    du_dy = np.fft.ifft2((1j * ky_grid) * u_hat, axes=(-2, -1)).real
+    omega = dv_dx - du_dy
+    return np.asarray(omega, dtype=np.float32)
+
+
+def _pdebench_array_to_trajectories(
+    array: np.ndarray,
+    layout: str,
+    channel_index: int,
+    keep_channels: bool = False,
+) -> np.ndarray:
     arr = np.asarray(array, dtype=np.float32)
     resolved_layout = _resolve_layout(arr.ndim, layout)
     axis_map = {label: idx for idx, label in enumerate(resolved_layout)}
@@ -529,16 +583,19 @@ def _pdebench_array_to_trajectories(array: np.ndarray, layout: str, channel_inde
     if not required.issubset(axis_map):
         raise ValueError(f"PDEBench layout must include N,T,H,W. Got '{resolved_layout}'.")
 
-    if "C" in axis_map:
+    if "C" in axis_map and not keep_channels:
         ch = min(max(0, int(channel_index)), arr.shape[axis_map["C"]] - 1)
         arr = np.take(arr, indices=ch, axis=axis_map["C"])
         resolved_layout = resolved_layout.replace("C", "")
         axis_map = {label: idx for idx, label in enumerate(resolved_layout)}
 
-    perm = [axis_map["N"], axis_map["T"], axis_map["H"], axis_map["W"]]
+    if "C" in axis_map:
+        perm = [axis_map["N"], axis_map["T"], axis_map["H"], axis_map["W"], axis_map["C"]]
+    else:
+        perm = [axis_map["N"], axis_map["T"], axis_map["H"], axis_map["W"]]
     arr = np.transpose(arr, axes=perm)
-    if arr.ndim != 4:
-        raise ValueError(f"Expected NTHW after transpose, got shape {arr.shape}")
+    if arr.ndim not in {4, 5}:
+        raise ValueError(f"Expected NTHW or NTHWC after transpose, got shape {arr.shape}")
     return np.asarray(arr, dtype=np.float32)
 
 

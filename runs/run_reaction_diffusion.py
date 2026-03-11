@@ -19,6 +19,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.reaction_diffusion import GrayScottConfig, GrayScottSolver
+from data.reaction_diffusion_external import (
+    load_pdebench_reaction_diffusion_data,
+    normalize_external_source,
+    pdebench_source_config_from_yaml,
+)
 from models.reaction_diffusion import LOSS_CHOICES, build_model, normalize_loss_name, rollout_coupled
 from utils.config import load_yaml_config
 from utils.diagnostics import BASIS_CHOICES, ReactionDiffusionRSDAnalyzer, normalize_basis_name
@@ -75,24 +80,68 @@ def run_single_seed(
     show_data_progress: bool = False,
     show_training_progress: bool = False,
     show_eval_progress: bool = False,
+    preloaded_train_data: List[Dict[str, np.ndarray]] | None = None,
+    preloaded_test_cases: List[Dict[str, np.ndarray]] | None = None,
+    snapshot_dt: float | None = None,
+    data_source: str = "generated",
+    data_metadata: Mapping[str, Any] | None = None,
 ) -> Dict[str, float]:
     """Train/evaluate clean and noisy models for one seed."""
     np.random.seed(seed * 1000)
 
-    solver = GrayScottSolver(config)
     rsd = ReactionDiffusionRSDAnalyzer(config, basis=basis)
 
-    train_data = []
-    for idx in progress_iter(
-        range(config.n_train_trajectories),
-        enabled=show_data_progress,
-        desc="Data gen (train)",
-        total=config.n_train_trajectories,
-    ):
-        u0, v0 = _sample_initial_condition(solver, config, seed=seed * 1000 + idx)
-        t_save, u_traj, v_traj = solver.solve(u0, v0, config.t_final, config.n_snapshots)
-        train_data.append({"u": u_traj, "v": v_traj})
-    dt = float(t_save[1] - t_save[0])
+    if preloaded_train_data is not None and preloaded_test_cases is not None:
+        train_data = [
+            {
+                "u": np.asarray(item["u"], dtype=np.float32),
+                "v": np.asarray(item["v"], dtype=np.float32),
+            }
+            for item in preloaded_train_data
+        ]
+        test_cases = []
+        for item in preloaded_test_cases:
+            u_true = np.asarray(item["u_true"], dtype=np.float32)
+            v_true = np.asarray(item["v_true"], dtype=np.float32)
+            u0 = np.asarray(item.get("u0", u_true[0]), dtype=np.float32)
+            v0 = np.asarray(item.get("v0", v_true[0]), dtype=np.float32)
+            test_cases.append(
+                {
+                    "u0": u0,
+                    "v0": v0,
+                    "u_true": u_true,
+                    "v_true": v_true,
+                }
+            )
+        if snapshot_dt is None:
+            raise ValueError("snapshot_dt is required when preloaded trajectory data is provided.")
+        dt = float(snapshot_dt)
+        if not np.isfinite(dt) or dt <= 0.0:
+            raise ValueError(f"Resolved non-positive dt ({dt}) from preloaded data.")
+    else:
+        solver = GrayScottSolver(config)
+        train_data = []
+        for idx in progress_iter(
+            range(config.n_train_trajectories),
+            enabled=show_data_progress,
+            desc="Data gen (train)",
+            total=config.n_train_trajectories,
+        ):
+            u0, v0 = _sample_initial_condition(solver, config, seed=seed * 1000 + idx)
+            t_save, u_traj, v_traj = solver.solve(u0, v0, config.t_final, config.n_snapshots)
+            train_data.append({"u": u_traj, "v": v_traj})
+        dt = float(t_save[1] - t_save[0])
+
+        test_cases = []
+        for idx in progress_iter(
+            range(config.n_test_trajectories),
+            enabled=show_data_progress,
+            desc="Data gen (test)",
+            total=config.n_test_trajectories,
+        ):
+            u0, v0 = _sample_initial_condition(solver, config, seed=seed * 1000 + 500 + idx)
+            _, u_true, v_true = solver.solve(u0, v0, config.t_final, config.n_snapshots)
+            test_cases.append({"u0": u0, "v0": v0, "u_true": u_true, "v_true": v_true})
 
     val_fraction = float(np.clip(config.train_validation_fraction, 0.0, 0.95))
     n_train_traj_total = len(train_data)
@@ -109,17 +158,6 @@ def run_single_seed(
     if not fit_train_data:
         fit_train_data = train_data
         val_data = []
-
-    test_cases = []
-    for idx in progress_iter(
-        range(config.n_test_trajectories),
-        enabled=show_data_progress,
-        desc="Data gen (test)",
-        total=config.n_test_trajectories,
-    ):
-        u0, v0 = _sample_initial_condition(solver, config, seed=seed * 1000 + 500 + idx)
-        _, u_true, v_true = solver.solve(u0, v0, config.t_final, config.n_snapshots)
-        test_cases.append({"u0": u0, "v0": v0, "u_true": u_true, "v_true": v_true})
 
     if trajectory_case_indices:
         requested_cases = [int(idx) for idx in trajectory_case_indices]
@@ -436,6 +474,14 @@ def run_single_seed(
         "_checkpoint_clean": model_clean.state_dict(),
         "_checkpoint_noisy": model_noisy.state_dict(),
         "_resolved_device": str(model_clean.device),
+        "_data": {
+            "source": str(data_source),
+            "dt": float(dt),
+            "n_snapshots": int(config.n_snapshots),
+            "n_train": int(len(train_data)),
+            "n_test": int(len(test_cases)),
+            "metadata": dict(data_metadata or {}),
+        },
     }
 
 
@@ -520,6 +566,24 @@ def main() -> None:
     training_progress = bool(progress.get("training", progress_enabled))
     eval_progress = bool(progress.get("evaluation", progress_enabled))
 
+    external_cfg = ((raw_config.get("data", {}) or {}).get("external", {}) or {})
+    source_name = normalize_external_source(str(external_cfg.get("source", "generated")))
+    preloaded_train_data = None
+    preloaded_test_cases = None
+    snapshot_dt = None
+    data_metadata: Dict[str, Any] = {}
+    if source_name == "pdebench":
+        pde_cfg = pdebench_source_config_from_yaml(raw_config)
+        loaded = load_pdebench_reaction_diffusion_data(config, pde_cfg, seed=args.seed)
+        preloaded_train_data = loaded.train_data
+        preloaded_test_cases = loaded.test_cases
+        snapshot_dt = float(loaded.dt)
+        config.n_snapshots = int(loaded.n_snapshots)
+        config.t_final = float(snapshot_dt) * float(max(config.n_snapshots - 1, 1))
+        config.n_train_trajectories = int(len(preloaded_train_data))
+        config.n_test_trajectories = int(len(preloaded_test_cases))
+        data_metadata = dict(loaded.metadata)
+
     results = run_single_seed(
         config,
         args.method,
@@ -536,12 +600,18 @@ def main() -> None:
         show_data_progress=data_progress,
         show_training_progress=training_progress,
         show_eval_progress=eval_progress,
+        preloaded_train_data=preloaded_train_data,
+        preloaded_test_cases=preloaded_test_cases,
+        snapshot_dt=snapshot_dt,
+        data_source=source_name,
+        data_metadata=data_metadata,
     )
 
     checkpoint_clean = results.pop("_checkpoint_clean")
     checkpoint_noisy = results.pop("_checkpoint_noisy")
     viz_payload = results.pop("_viz")
     resolved_device = results.pop("_resolved_device")
+    data_info = results.pop("_data")
 
     save_checkpoint(run_ckpt_dir / "model_clean.npz", checkpoint_clean)
     save_checkpoint(run_ckpt_dir / "model_noisy.npz", checkpoint_noisy)
@@ -557,6 +627,7 @@ def main() -> None:
         "basis": requested_basis,
         "metrics": results,
         "viz_indices": viz_payload["indices"],
+        "data": data_info,
     }
     save_json(run_out_dir / "results.json", summary)
 
@@ -723,6 +794,7 @@ def main() -> None:
     print(f"Device: requested={requested_device} resolved={resolved_device}")
     print(f"Loss: {requested_loss}")
     print(f"Basis: {requested_basis}")
+    print(f"Data source: {data_info['source']}")
     print(f"Results: {run_out_dir / 'results.json'}")
     print(f"Checkpoints: {run_ckpt_dir}")
 

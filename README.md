@@ -87,6 +87,7 @@ Each YAML controls all run parameters, including:
 Notes:
 - NeuralOperator PT data is one-step-oriented; the runner constructs short trajectories from each batch sample's `x/y` pair.
 - PDEBench mode expects a local HDF5 file path (`data.external.pdebench.file_path`) and supports layout mapping via `data.external.pdebench.layout` (`AUTO`, `NTHW`, `NTHWC`, etc.).
+- For PDEBench `ns_incom` velocity files, the loader converts `(u, v)` to vorticity `omega = dv/dx - du/dy` before model training/evaluation so NS-RSD metrics remain on vorticity trajectories.
 - In all modes, noisy training data is now explicitly corrupted in memory (HF spectral noise injection) before fitting the noisy model.
 
 #### PDEBench Downloader Helper
@@ -106,6 +107,42 @@ Useful flags:
 - `--max-files 0`: remove file limit (default is `1`).
 - `--skip-config-update`: download only, no YAML edit.
 - `--dry-run`: print actions without downloading/writing.
+
+By default, the helper now also aligns run-config fields automatically after download:
+- sets `data.external.source: pdebench`
+- sets `data.external.pdebench.file_path`
+- inspects HDF5 and sets `data.external.pdebench.dataset_key`, `layout`, `channel_index`, and `dt` (when available)
+- disables synthetic forcing defaults (`physics.forcing.type: none`, `physics.forcing.amplitude: 0.0`)
+- adjusts stride/snapshot compatibility when it can do so safely
+
+Disable auto-alignment if needed:
+
+```bash
+python3 data/download_pdebench.py --pde-name ns_incom --no-align-run-config
+```
+
+#### PDEBench NS Processor (Downsample + Omega)
+
+Use `data/downsample_pdebench_ns.py` to convert downloaded NS velocity data into a run-ready vorticity file and auto-align `configs/navier_stokes.yaml`:
+
+```bash
+python3 data/downsample_pdebench_ns.py \
+  --input external_data/pdebench/2D/NS_incom/ns_incom_inhom_2d_512-0.h5 \
+  --output external_data/pdebench/2D/NS_incom/ns_incom_inhom_2d_64_omega.h5 \
+  --nx 64 \
+  --ny 64 \
+  --overwrite
+```
+
+By default, this script patches `configs/navier_stokes.yaml` after processing. Use `--patch-config <path>` to target a different file, or `--skip-config-update` to disable patching.
+
+When patching config, it updates all NS run-critical fields from processed metadata:
+- `grid.nx`, `grid.ny`, `grid.Lx`, `grid.Ly`
+- `time.n_snapshots` (clamped to available), `time.t_final` (from resolved `dt`)
+- `physics.nu`, and forcing defaults (`type: none`, `amplitude: 0.0`)
+- `data.n_train_trajectories`, `data.n_test_trajectories` (auto split from sample count)
+- `data.external.source`
+- `data.external.pdebench.file_path`, `dataset_key`, `layout`, `channel_index`, `time_stride`, `spatial_stride`, `n_train`, `n_test`, `dt` (when available)
 
 ### Device Selection
 

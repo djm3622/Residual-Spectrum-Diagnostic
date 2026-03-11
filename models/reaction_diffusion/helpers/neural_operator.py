@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import inspect
 from contextlib import redirect_stdout
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -60,6 +61,65 @@ def _resolve_modes_2d(value: Any, nx: int, ny: int, default: int = 20) -> Tuple[
     return mx, my
 
 
+def _constructor_accepts_kwargs(model_cls: Any) -> bool:
+    """Whether model constructor has a **kwargs sink."""
+    try:
+        signature = inspect.signature(model_cls.__init__)
+    except (TypeError, ValueError):
+        return True
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+
+
+def _constructor_param_names(model_cls: Any) -> set[str]:
+    """Best-effort set of explicit constructor parameter names."""
+    try:
+        signature = inspect.signature(model_cls.__init__)
+    except (TypeError, ValueError):
+        return set()
+    return {name for name in signature.parameters if name != "self"}
+
+
+def _filtered_ctor_kwargs(model_cls: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop unsupported kwargs for strict constructors."""
+    if _constructor_accepts_kwargs(model_cls):
+        return kwargs
+    supported = _constructor_param_names(model_cls)
+    return {key: value for key, value in kwargs.items() if key in supported}
+
+
+def _add_channel_config_kwargs(
+    model_cls: Any,
+    kwargs: Dict[str, Any],
+    hidden_channels: int,
+    lifting_ratio: float,
+    projection_ratio: float,
+) -> Dict[str, Any]:
+    """Populate lifting/projection args in a version-safe way.
+
+    Some neuralop TFNO versions compute channel counts directly from
+    `*_channel_ratio` without integer casting, so we prefer explicit
+    integer channel counts when available.
+    """
+    params = _constructor_param_names(model_cls)
+
+    resolved_lifting_channels = max(1, int(round(hidden_channels * max(lifting_ratio, 1e-6))))
+    resolved_projection_channels = max(1, int(round(hidden_channels * max(projection_ratio, 1e-6))))
+
+    if "lifting_channels" in params:
+        kwargs["lifting_channels"] = resolved_lifting_channels
+    elif "lifting_channel_ratio" in params:
+        rounded = int(round(lifting_ratio))
+        kwargs["lifting_channel_ratio"] = rounded if abs(lifting_ratio - rounded) < 1e-8 else lifting_ratio
+
+    if "projection_channels" in params:
+        kwargs["projection_channels"] = resolved_projection_channels
+    elif "projection_channel_ratio" in params:
+        rounded = int(round(projection_ratio))
+        kwargs["projection_channel_ratio"] = rounded if abs(projection_ratio - rounded) < 1e-8 else projection_ratio
+
+    return kwargs
+
+
 def resolve_operator_config(operator: str, operator_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """Merge common and operator-specific YAML config for neural operators."""
     merged: Dict[str, Any] = {}
@@ -99,20 +159,20 @@ def build_fno_like_model(
     channel_mlp_skip = str(config.get("channel_mlp_skip", "soft-gating"))
     fno_skip = str(config.get("fno_skip", "linear"))
     use_channel_mlp = bool(config.get("use_channel_mlp", True))
+    lifting_ratio = float(config.get("lifting_channel_ratio", 2.0))
+    projection_ratio = float(config.get("projection_channel_ratio", 2.0))
 
     factorization = _normalize_optional_name(config.get("factorization"))
     if isinstance(factorization, str):
         factorization = factorization.strip()
 
     if operator == "fno":
-        return FNO(
+        fno_kwargs: Dict[str, Any] = dict(
             n_modes=(modes_x, modes_y),
             in_channels=in_channels,
             out_channels=out_channels,
             hidden_channels=hidden_channels,
             n_layers=max(1, int(config.get("n_layers", 6))),
-            lifting_channel_ratio=float(config.get("lifting_channel_ratio", 2.0)),
-            projection_channel_ratio=float(config.get("projection_channel_ratio", 2.0)),
             positional_embedding=str(config.get("positional_embedding", "grid")),
             norm=norm,
             use_channel_mlp=use_channel_mlp,
@@ -126,16 +186,22 @@ def build_fno_like_model(
             rank=float(config.get("rank", 1.0)),
             implementation=implementation,
         )
+        fno_kwargs = _add_channel_config_kwargs(
+            FNO,
+            fno_kwargs,
+            hidden_channels=hidden_channels,
+            lifting_ratio=lifting_ratio,
+            projection_ratio=projection_ratio,
+        )
+        return FNO(**_filtered_ctor_kwargs(FNO, fno_kwargs))
 
     if operator == "tfno":
-        return TFNO(
+        tfno_kwargs: Dict[str, Any] = dict(
             n_modes=(modes_x, modes_y),
             in_channels=in_channels,
             out_channels=out_channels,
             hidden_channels=hidden_channels,
             n_layers=max(1, int(config.get("n_layers", 6))),
-            lifting_channel_ratio=float(config.get("lifting_channel_ratio", 2.0)),
-            projection_channel_ratio=float(config.get("projection_channel_ratio", 2.0)),
             positional_embedding=str(config.get("positional_embedding", "grid")),
             norm=norm,
             use_channel_mlp=use_channel_mlp,
@@ -149,6 +215,14 @@ def build_fno_like_model(
             rank=float(config.get("rank", 0.2)),
             implementation=implementation,
         )
+        tfno_kwargs = _add_channel_config_kwargs(
+            TFNO,
+            tfno_kwargs,
+            hidden_channels=hidden_channels,
+            lifting_ratio=lifting_ratio,
+            projection_ratio=projection_ratio,
+        )
+        return TFNO(**_filtered_ctor_kwargs(TFNO, tfno_kwargs))
 
     if operator == "uno":
         n_layers = max(2, int(config.get("n_layers", 5)))
