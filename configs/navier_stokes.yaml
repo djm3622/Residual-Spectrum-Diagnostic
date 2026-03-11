@@ -18,13 +18,13 @@ physics:
     phase: 0.0
 
 time:
-  t_final: 0.019
-  n_snapshots: 20
+  t_final: 0.0019
+  n_snapshots: 200
   dt_max: 0.001
 
 data:
-  n_train_trajectories: 24
-  n_test_trajectories: 6
+  n_train_trajectories: 12
+  n_test_trajectories: 3
   initial_condition: line_wave
   initial_n_modes: 1
   initial_kmax: 1
@@ -37,12 +37,12 @@ training:
   loss: combined
   noise_level: 0.04
   lr: 0.001
-  n_iter: 300
+  n_iter: 500
   batch_size: 32
   grad_clip: 1.0
-  rollout_horizon: 4
-  rollout_weight: 0.6
-  model_width: 64
+  rollout_horizon: 10
+  rollout_weight: 0.8
+  model_width: 32
   model_depth: 5
 
 progress:
