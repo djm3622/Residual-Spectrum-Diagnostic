@@ -17,6 +17,41 @@ import matplotlib.colors as mcolors
 import numpy as np
 
 
+def _shared_field_norm(
+    frames: List[np.ndarray],
+    low_pct: float = 1.0,
+    high_pct: float = 99.0,
+) -> mcolors.Normalize:
+    """Build a shared robust normalization for signed/unsigned field panels."""
+    finite_values: List[np.ndarray] = []
+    for frame in frames:
+        arr = np.asarray(frame, dtype=np.float32)
+        finite = arr[np.isfinite(arr)]
+        if finite.size > 0:
+            finite_values.append(finite.reshape(-1))
+
+    if not finite_values:
+        return mcolors.Normalize(vmin=-1.0, vmax=1.0)
+
+    merged = np.concatenate(finite_values)
+    vmin = float(np.percentile(merged, low_pct))
+    vmax = float(np.percentile(merged, high_pct))
+    if not np.isfinite(vmin):
+        vmin = float(np.min(merged))
+    if not np.isfinite(vmax):
+        vmax = float(np.max(merged))
+    if vmax <= vmin:
+        vmin = float(np.min(merged))
+        vmax = float(np.max(merged))
+    if vmax <= vmin:
+        vmax = vmin + 1e-12
+
+    if vmin < 0.0 < vmax:
+        abs_lim = max(abs(vmin), abs(vmax), 1e-12)
+        return mcolors.TwoSlopeNorm(vmin=-abs_lim, vcenter=0.0, vmax=abs_lim)
+    return mcolors.Normalize(vmin=vmin, vmax=vmax)
+
+
 def _annotate_min_max(ax: plt.Axes, data: np.ndarray) -> None:
     """Overlay per-panel min/max values."""
     min_val = float(np.min(data))
@@ -144,7 +179,7 @@ def save_coupled_fit_panel(
     ]
 
     for row_idx, (name, inp, tgt, pred, err) in enumerate(rows):
-        vmax = float(max(np.max(inp), np.max(tgt), np.max(pred), 1e-12))
+        field_norm = _shared_field_norm([inp, tgt, pred], low_pct=1.0, high_pct=99.0)
         data_panels = [
             (inp, f"{name}: Input"),
             (tgt, f"{name}: Target (y)"),
@@ -155,13 +190,13 @@ def save_coupled_fit_panel(
         for col_idx, (data, panel_title) in enumerate(data_panels):
             ax = axes[row_idx, col_idx]
             if col_idx == 0:
-                im = ax.imshow(data, cmap=input_cmap, vmin=0.0, vmax=vmax)
+                im = ax.imshow(data, cmap=input_cmap, norm=field_norm)
                 for spine in ax.spines.values():
                     spine.set_visible(True)
                     spine.set_linewidth(input_border_width)
                     spine.set_edgecolor(input_border_color)
             elif col_idx < 3:
-                im = ax.imshow(data, cmap=output_cmap, vmin=0.0, vmax=vmax)
+                im = ax.imshow(data, cmap=output_cmap, norm=field_norm)
             else:
                 im = ax.imshow(data, cmap="magma")
             ax.set_title(panel_title)
@@ -256,6 +291,14 @@ def save_trajectory_field_rows(
     n_rows = len(rows)
     n_cols = len(step_indices)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(2.3 * n_cols, 2.0 * n_rows), squeeze=False)
+    scale_frames: List[np.ndarray] = []
+    for row in rows:
+        traj = np.asarray(row["traj"])
+        max_step = traj.shape[0] - 1
+        for step in step_indices:
+            idx = int(np.clip(step, 0, max_step))
+            scale_frames.append(np.asarray(traj[idx], dtype=np.float32))
+    shared_norm = _shared_field_norm(scale_frames, low_pct=1.0, high_pct=99.0)
 
     last_im = None
     for row_idx, row in enumerate(rows):
@@ -267,26 +310,7 @@ def save_trajectory_field_rows(
             idx = int(np.clip(step, 0, max_step))
             frame = traj[idx]
             ax = axes[row_idx, col_idx]
-            p1 = float(np.percentile(frame, 1.0))
-            p99 = float(np.percentile(frame, 99.0))
-            if not np.isfinite(p1):
-                p1 = float(np.min(frame))
-            if not np.isfinite(p99):
-                p99 = float(np.max(frame))
-
-            if p99 <= p1:
-                p1 = float(np.min(frame))
-                p99 = float(np.max(frame))
-                if p99 <= p1:
-                    p99 = p1 + 1e-12
-
-            if p1 < 0.0 < p99:
-                abs_lim = max(abs(p1), abs(p99), 1e-12)
-                norm = mcolors.TwoSlopeNorm(vmin=-abs_lim, vcenter=0.0, vmax=abs_lim)
-            else:
-                norm = mcolors.Normalize(vmin=p1, vmax=p99)
-
-            last_im = ax.imshow(frame, cmap=cmap, norm=norm)
+            last_im = ax.imshow(frame, cmap=cmap, norm=shared_norm)
             ax.axis("off")
             _annotate_min_max(ax, frame)
 
@@ -297,7 +321,7 @@ def save_trajectory_field_rows(
 
     if last_im is not None:
         cbar = fig.colorbar(last_im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.01)
-        cbar.set_label("Field value")
+        cbar.set_label("Field value (shared scale)")
 
     fig.suptitle(title, fontsize=11)
     fig.subplots_adjust(left=0.1, right=0.93, top=0.9, bottom=0.04, wspace=0.02, hspace=0.08)

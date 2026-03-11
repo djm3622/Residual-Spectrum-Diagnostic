@@ -15,7 +15,7 @@ time:
   n_snapshots: 101
   dt: 0.04999995231628418
 data:
-  n_train_trajectories: 850
+  n_train_trajectories: 500
   n_test_trajectories: 150
   initial_condition: center_square
   initial_square_size: 20
@@ -47,7 +47,7 @@ data:
       missing_physics:
       - F
       time_stride: 1
-      n_train: 850
+      n_train: 500
       n_test: 150
       shuffle: true
       split_seed_offset: 1207
@@ -58,7 +58,7 @@ training:
   loss: combined
   noise_level: 0.03
   lr: 0.001
-  n_iter: 500
+  n_iter: 100
   batch_size: 32
   grad_clip: 1.0
   rollout_horizon: 10
