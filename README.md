@@ -89,6 +89,24 @@ Notes:
 - PDEBench mode expects a local HDF5 file path (`data.external.pdebench.file_path`) and supports layout mapping via `data.external.pdebench.layout` (`AUTO`, `NTHW`, `NTHWC`, etc.).
 - In all modes, noisy training data is now explicitly corrupted in memory (HF spectral noise injection) before fitting the noisy model.
 
+#### PDEBench Downloader Helper
+
+Use `data/download_pdebench.py` to fetch PDEBench files into a standard folder and patch your YAML automatically:
+
+```bash
+python3 data/download_pdebench.py \
+  --pde-name ns_incom \
+  --root-folder external_data/pdebench \
+  --config-yaml configs/navier_stokes.yaml \
+  --autofill-source
+```
+
+Useful flags:
+- `--filename-contains <text>`: narrow matches (repeatable).
+- `--max-files 0`: remove file limit (default is `1`).
+- `--skip-config-update`: download only, no YAML edit.
+- `--dry-run`: print actions without downloading/writing.
+
 ### Device Selection
 
 - Set `training.device` in YAML (`auto`, `cpu`, `cuda`, `mps`), or pass `--device` to override.
