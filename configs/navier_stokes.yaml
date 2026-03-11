@@ -45,11 +45,12 @@ training:
   validation_fraction: 0.15
   model_width: 32
   model_depth: 5
+
   neural_operator:
     common:
       n_modes: [20, 20]
-      hidden_channels: 72
-      n_layers: 6
+      hidden_channels: 32
+      n_layers: 4
       lifting_channel_ratio: 2.0
       projection_channel_ratio: 2.0
       use_channel_mlp: true
@@ -66,8 +67,8 @@ training:
       factorization: Tucker
       rank: 0.2
     uno:
-      hidden_channels: 72
-      n_layers: 5
+      hidden_channels: 32
+      n_layers: 4
       lifting_channels: 192
       projection_channels: 192
       channel_mlp_skip: linear
