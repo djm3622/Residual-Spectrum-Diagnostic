@@ -110,13 +110,10 @@ class NeuralOperatorSurrogate2DCoupled:
             n_modes_override=n_modes_override,
         ).to(self.device)
         self.grad_scaler = maybe_disable_grad_scaler_for_complex_params(self.grad_scaler, self.net)
-<<<<<<< HEAD
         self.input_mean = torch.zeros(1, 2, 1, 1, device=self.device)
         self.input_std = torch.ones(1, 2, 1, 1, device=self.device)
         self.target_mean = torch.zeros(1, 2, 1, 1, device=self.device)
         self.target_std = torch.ones(1, 2, 1, 1, device=self.device)
-=======
->>>>>>> refs/remotes/origin/main
         self.net.eval()
 
     def _prepare_window(self, field_window: np.ndarray) -> np.ndarray:
