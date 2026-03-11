@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Mapping
 
 import numpy as np
 
@@ -66,6 +66,7 @@ def run_single_seed(
     device: str = "auto",
     loss: str = "combined",
     basis: str = "fourier",
+    operator_config: Mapping[str, Any] | None = None,
     eval_pair_index: int = 0,
     test_case_index: int = 0,
     test_step_index: int = 0,
@@ -92,6 +93,22 @@ def run_single_seed(
         t_save, u_traj, v_traj = solver.solve(u0, v0, config.t_final, config.n_snapshots)
         train_data.append({"u": u_traj, "v": v_traj})
     dt = float(t_save[1] - t_save[0])
+
+    val_fraction = float(np.clip(config.train_validation_fraction, 0.0, 0.95))
+    n_train_traj_total = len(train_data)
+    n_val_traj = 0
+    if n_train_traj_total > 1 and val_fraction > 0.0:
+        n_val_traj = int(round(n_train_traj_total * val_fraction))
+        n_val_traj = max(1, min(n_train_traj_total - 1, n_val_traj))
+
+    split_rng = np.random.default_rng(seed * 1000 + 907)
+    split_perm = list(split_rng.permutation(n_train_traj_total))
+    val_idx_set = set(split_perm[:n_val_traj])
+    fit_train_data = [traj for idx, traj in enumerate(train_data) if idx not in val_idx_set]
+    val_data = [traj for idx, traj in enumerate(train_data) if idx in val_idx_set]
+    if not fit_train_data:
+        fit_train_data = train_data
+        val_data = []
 
     test_cases = []
     for idx in progress_iter(
@@ -139,6 +156,14 @@ def run_single_seed(
     targets_v_clean: List[np.ndarray] = []
     targets_u_noisy: List[np.ndarray] = []
     targets_v_noisy: List[np.ndarray] = []
+    val_inputs_u: List[np.ndarray] = []
+    val_inputs_v: List[np.ndarray] = []
+    val_inputs_u_noisy: List[np.ndarray] = []
+    val_inputs_v_noisy: List[np.ndarray] = []
+    val_targets_u_clean: List[np.ndarray] = []
+    val_targets_v_clean: List[np.ndarray] = []
+    val_targets_u_noisy: List[np.ndarray] = []
+    val_targets_v_noisy: List[np.ndarray] = []
     pair_steps: List[int] = []
     train_trajectory_u: List[np.ndarray] = []
     train_trajectory_v: List[np.ndarray] = []
@@ -146,10 +171,10 @@ def run_single_seed(
     train_trajectory_v_noisy: List[np.ndarray] = []
 
     for data in progress_iter(
-        train_data,
+        fit_train_data,
         enabled=show_data_progress,
         desc="Build train pairs",
-        total=len(train_data),
+        total=len(fit_train_data),
     ):
         u_traj = np.asarray(data["u"], dtype=np.float32)
         v_traj = np.asarray(data["v"], dtype=np.float32)
@@ -185,6 +210,35 @@ def run_single_seed(
             targets_v_noisy.append(v_traj_noisy[step + 1])
             pair_steps.append(step)
 
+    for data in val_data:
+        u_traj = np.asarray(data["u"], dtype=np.float32)
+        v_traj = np.asarray(data["v"], dtype=np.float32)
+
+        u_traj_noisy = np.empty_like(u_traj, dtype=np.float32)
+        v_traj_noisy = np.empty_like(v_traj, dtype=np.float32)
+        for step in range(len(u_traj)):
+            u_noisy_step, v_noisy_step = add_hf_noise_coupled(
+                u_traj[step],
+                v_traj[step],
+                config.noise_level,
+                config.nx,
+                config.ny,
+                Lx=config.Lx,
+                Ly=config.Ly,
+            )
+            u_traj_noisy[step] = np.asarray(u_noisy_step, dtype=np.float32)
+            v_traj_noisy[step] = np.asarray(v_noisy_step, dtype=np.float32)
+
+        for step in range(len(u_traj) - 1):
+            val_inputs_u.append(u_traj[step])
+            val_inputs_v.append(v_traj[step])
+            val_inputs_u_noisy.append(u_traj_noisy[step])
+            val_inputs_v_noisy.append(v_traj_noisy[step])
+            val_targets_u_clean.append(u_traj[step + 1])
+            val_targets_v_clean.append(v_traj[step + 1])
+            val_targets_u_noisy.append(u_traj_noisy[step + 1])
+            val_targets_v_noisy.append(v_traj_noisy[step + 1])
+
     model_clean = build_model(
         method,
         config.nx,
@@ -194,6 +248,7 @@ def run_single_seed(
         loss=loss,
         config=config,
         snapshot_dt=dt,
+        operator_config=operator_config,
     )
     model_noisy = build_model(
         method,
@@ -204,6 +259,7 @@ def run_single_seed(
         loss=loss,
         config=config,
         snapshot_dt=dt,
+        operator_config=operator_config,
     )
 
     model_clean.train(
@@ -219,6 +275,10 @@ def run_single_seed(
         trajectory_v=train_trajectory_v,
         rollout_horizon=config.train_rollout_horizon,
         rollout_weight=config.train_rollout_weight,
+        val_inputs_u=val_inputs_u,
+        val_inputs_v=val_inputs_v,
+        val_targets_u=val_targets_u_clean,
+        val_targets_v=val_targets_v_clean,
         pair_steps=pair_steps,
         u_weight=config.train_u_weight,
         v_weight=config.train_v_weight,
@@ -242,6 +302,10 @@ def run_single_seed(
         trajectory_v=train_trajectory_v_noisy,
         rollout_horizon=config.train_rollout_horizon,
         rollout_weight=config.train_rollout_weight,
+        val_inputs_u=val_inputs_u_noisy,
+        val_inputs_v=val_inputs_v_noisy,
+        val_targets_u=val_targets_u_noisy,
+        val_targets_v=val_targets_v_noisy,
         pair_steps=pair_steps,
         u_weight=config.train_u_weight,
         v_weight=config.train_v_weight,
@@ -383,7 +447,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "method",
         type=str,
-        help="Model method (conv=neural default, conv_nn=neural alias, physics=explicit Gray-Scott).",
+        help="Model method (conv, fno, tfno, uno, physics).",
     )
     parser.add_argument("seed", type=int, help="Random seed number")
     parser.add_argument(
@@ -423,6 +487,7 @@ def main() -> None:
     experiment = raw_config.get("experiment", {})
     experiment_name = experiment.get("name", "reaction_diffusion")
     training = raw_config.get("training", {})
+    operator_config = training.get("neural_operator", {})
     rsd_cfg = raw_config.get("rsd", {})
     requested_device = args.device if args.device is not None else str(training.get("device", "auto"))
     requested_loss = normalize_loss_name(args.loss if args.loss is not None else str(training.get("loss", "combined")))
@@ -462,6 +527,7 @@ def main() -> None:
         device=requested_device,
         loss=requested_loss,
         basis=requested_basis,
+        operator_config=operator_config,
         eval_pair_index=eval_pair_index,
         test_case_index=test_case_index,
         test_step_index=test_step_index,

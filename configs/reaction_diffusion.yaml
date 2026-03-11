@@ -35,12 +35,52 @@ training:
   grad_clip: 1.0
   rollout_horizon: 10
   rollout_weight: 0.8
+  validation_fraction: 0.15
   u_weight: 1.5
   v_weight: 1.0
   channel_balance_cap: 3.0
   dynamics_weight: 0.2
   early_step_bias: 1.0
   early_step_decay: 24.0
+  neural_operator:
+    common:
+      n_modes: [20, 20]
+      hidden_channels: 80
+      n_layers: 6
+      lifting_channel_ratio: 2.0
+      projection_channel_ratio: 2.0
+      use_channel_mlp: true
+      channel_mlp_expansion: 0.75
+      channel_mlp_dropout: 0.0
+      fno_skip: linear
+      channel_mlp_skip: soft-gating
+      norm: null
+      domain_padding: 0.0
+      implementation: factorized
+      separable: false
+      rank: 1.0
+    tfno:
+      factorization: Tucker
+      rank: 0.2
+    uno:
+      hidden_channels: 80
+      n_layers: 5
+      lifting_channels: 224
+      projection_channels: 224
+      channel_mlp_skip: linear
+      uno_out_channels: [80, 112, 112, 112, 80]
+      uno_n_modes:
+        - [12, 12]
+        - [12, 12]
+        - [12, 12]
+        - [12, 12]
+        - [12, 12]
+      uno_scalings:
+        - [1.0, 1.0]
+        - [0.5, 0.5]
+        - [1.0, 1.0]
+        - [1.0, 1.0]
+        - [2.0, 2.0]
 
 progress:
   enabled: true

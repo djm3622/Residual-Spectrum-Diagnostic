@@ -4,3 +4,4 @@ matplotlib
 PyYAML
 torch
 tqdm
+neuraloperator

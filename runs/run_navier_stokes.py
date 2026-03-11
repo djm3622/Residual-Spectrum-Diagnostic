@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Mapping
 
 import numpy as np
 
@@ -44,6 +44,7 @@ def run_single_seed(
     device: str = "auto",
     loss: str = "combined",
     basis: str = "fourier",
+    operator_config: Mapping[str, Any] | None = None,
     eval_pair_index: int = 0,
     test_case_index: int = 0,
     test_step_index: int = 0,
@@ -70,6 +71,22 @@ def run_single_seed(
         t_save, omega_traj = solver.solve(omega0, config.t_final, config.n_snapshots)
         train_trajectories.append(omega_traj)
     dt = float(t_save[1] - t_save[0])
+
+    val_fraction = float(np.clip(config.train_validation_fraction, 0.0, 0.95))
+    n_train_traj_total = len(train_trajectories)
+    n_val_traj = 0
+    if n_train_traj_total > 1 and val_fraction > 0.0:
+        n_val_traj = int(round(n_train_traj_total * val_fraction))
+        n_val_traj = max(1, min(n_train_traj_total - 1, n_val_traj))
+
+    split_rng = np.random.default_rng(seed * 1000 + 707)
+    split_perm = list(split_rng.permutation(n_train_traj_total))
+    val_idx_set = set(split_perm[:n_val_traj])
+    fit_trajectories = [traj for idx, traj in enumerate(train_trajectories) if idx not in val_idx_set]
+    val_trajectories = [traj for idx, traj in enumerate(train_trajectories) if idx in val_idx_set]
+    if not fit_trajectories:
+        fit_trajectories = train_trajectories
+        val_trajectories = []
 
     test_cases = []
     for idx in progress_iter(
@@ -112,17 +129,35 @@ def run_single_seed(
     inputs = []
     targets_clean = []
     targets_noisy = []
+    val_inputs = []
+    val_targets_clean = []
+    val_targets_noisy = []
 
     for trajectory in progress_iter(
-        train_trajectories,
+        fit_trajectories,
         enabled=show_data_progress,
         desc="Build train pairs",
-        total=len(train_trajectories),
+        total=len(fit_trajectories),
     ):
         for step in range(len(trajectory) - 1):
             inputs.append(trajectory[step])
             targets_clean.append(trajectory[step + 1])
             targets_noisy.append(
+                add_hf_noise_2d(
+                    trajectory[step + 1],
+                    config.noise_level,
+                    config.nx,
+                    config.ny,
+                    Lx=config.Lx,
+                    Ly=config.Ly,
+                )
+            )
+
+    for trajectory in val_trajectories:
+        for step in range(len(trajectory) - 1):
+            val_inputs.append(trajectory[step])
+            val_targets_clean.append(trajectory[step + 1])
+            val_targets_noisy.append(
                 add_hf_noise_2d(
                     trajectory[step + 1],
                     config.noise_level,
@@ -142,6 +177,7 @@ def run_single_seed(
         loss=loss,
         model_width=config.train_model_width,
         model_depth=config.train_model_depth,
+        operator_config=operator_config,
     )
     model_noisy = build_model(
         method,
@@ -152,6 +188,7 @@ def run_single_seed(
         loss=loss,
         model_width=config.train_model_width,
         model_depth=config.train_model_depth,
+        operator_config=operator_config,
     )
 
     model_clean.train(
@@ -161,9 +198,11 @@ def run_single_seed(
         n_iter=config.train_iterations,
         batch_size=config.train_batch_size,
         grad_clip=config.train_grad_clip,
-        trajectory=train_trajectories,
+        trajectory=fit_trajectories,
         rollout_horizon=config.train_rollout_horizon,
         rollout_weight=config.train_rollout_weight,
+        val_inputs=val_inputs,
+        val_targets=val_targets_clean,
         show_progress=show_training_progress,
         progress_desc="Training clean model",
     )
@@ -174,9 +213,11 @@ def run_single_seed(
         n_iter=config.train_iterations,
         batch_size=config.train_batch_size,
         grad_clip=config.train_grad_clip,
-        trajectory=train_trajectories,
+        trajectory=fit_trajectories,
         rollout_horizon=config.train_rollout_horizon,
         rollout_weight=config.train_rollout_weight,
+        val_inputs=val_inputs,
+        val_targets=val_targets_noisy,
         show_progress=show_training_progress,
         progress_desc="Training noisy model",
     )
@@ -284,7 +325,11 @@ def parse_args() -> argparse.Namespace:
         description="Run one Navier-Stokes experiment with YAML config, method, and seed."
     )
     parser.add_argument("config_yaml", type=str, help="Path to YAML config file")
-    parser.add_argument("method", type=str, help="Model method (e.g., conv)")
+    parser.add_argument(
+        "method",
+        type=str,
+        help="Model method (conv, fno, tfno, uno).",
+    )
     parser.add_argument("seed", type=int, help="Random seed number")
     parser.add_argument(
         "--device",
@@ -323,6 +368,7 @@ def main() -> None:
     experiment = raw_config.get("experiment", {})
     experiment_name = experiment.get("name", "navier_stokes")
     training = raw_config.get("training", {})
+    operator_config = training.get("neural_operator", {})
     rsd_cfg = raw_config.get("rsd", {})
     requested_device = args.device if args.device is not None else str(training.get("device", "auto"))
     requested_loss = normalize_loss_name(args.loss if args.loss is not None else str(training.get("loss", "combined")))
@@ -362,6 +408,7 @@ def main() -> None:
         device=requested_device,
         loss=requested_loss,
         basis=requested_basis,
+        operator_config=operator_config,
         eval_pair_index=eval_pair_index,
         test_case_index=test_case_index,
         test_step_index=test_step_index,

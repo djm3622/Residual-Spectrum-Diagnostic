@@ -43,6 +43,7 @@ class GrayScottConfig:
     train_grad_clip: float = 1.0
     train_rollout_horizon: int = 4
     train_rollout_weight: float = 0.6
+    train_validation_fraction: float = 0.1
     train_u_weight: float = 1.35
     train_v_weight: float = 1.0
     train_channel_balance_cap: float = 3.0
@@ -95,6 +96,7 @@ class GrayScottConfig:
             train_grad_clip=float(training.get("grad_clip", 1.0)),
             train_rollout_horizon=int(training.get("rollout_horizon", 4)),
             train_rollout_weight=float(training.get("rollout_weight", 0.6)),
+            train_validation_fraction=float(training.get("validation_fraction", 0.1)),
             train_u_weight=float(training.get("u_weight", 1.35)),
             train_v_weight=float(training.get("v_weight", 1.0)),
             train_channel_balance_cap=float(training.get("channel_balance_cap", 3.0)),
