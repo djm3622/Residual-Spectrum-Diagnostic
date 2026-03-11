@@ -14,6 +14,7 @@ from utils.torch_runtime import (
     build_grad_scaler,
     configure_torch_backend,
     resolve_torch_device,
+    maybe_disable_grad_scaler_for_complex_params,
     train_autocast,
 )
 
@@ -56,6 +57,7 @@ class NeuralOperatorSurrogate2DCoupled:
             ny=ny,
             config=merged_config,
         ).to(self.device)
+        self.grad_scaler = maybe_disable_grad_scaler_for_complex_params(self.grad_scaler, self.net)
         self.net.eval()
 
     def forward(self, u: np.ndarray, v: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:

@@ -71,31 +71,42 @@ def build_adam_optimizer(
     device: torch.device,
 ) -> torch.optim.Optimizer:
     """Build Adam optimizer with optional CUDA fused kernels."""
+    params = list(parameters)
+    has_complex_params = any(param.is_complex() for param in params)
+
     if device.type == "cuda":
         try:
-            return torch.optim.Adam(parameters, lr=lr, fused=True)
+            if not has_complex_params:
+                return torch.optim.Adam(params, lr=lr, fused=True)
         except (TypeError, RuntimeError):
             pass
-    return torch.optim.Adam(parameters, lr=lr)
+    return torch.optim.Adam(params, lr=lr)
 
 
 def build_grad_scaler(device: torch.device) -> torch.cuda.amp.GradScaler | None:
-    """Create a CUDA GradScaler when available."""
-    if device.type != "cuda":
+    """AMP is disabled for stability, so no GradScaler is needed."""
+    _ = device
+    return None
+
+
+def maybe_disable_grad_scaler_for_complex_params(
+    grad_scaler: torch.cuda.amp.GradScaler | None,
+    model: torch.nn.Module,
+) -> torch.cuda.amp.GradScaler | None:
+    """Disable CUDA GradScaler for models with complex-valued parameters.
+
+    PyTorch AMP unscale kernels do not support complex grads on CUDA.
+    """
+    if grad_scaler is None:
         return None
 
-    amp_module = getattr(torch, "amp", None)
-    if amp_module is not None and hasattr(amp_module, "GradScaler"):
-        try:
-            return amp_module.GradScaler("cuda", enabled=True)
-        except TypeError:
-            return amp_module.GradScaler(enabled=True)
-
-    return torch.cuda.amp.GradScaler(enabled=True)
+    for param in model.parameters():
+        if param.is_complex():
+            return None
+    return grad_scaler
 
 
 def train_autocast(device: torch.device):
-    """Context manager for CUDA mixed precision training."""
-    if device.type == "cuda":
-        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    """Autocast is disabled globally; always train in full precision."""
+    _ = device
     return nullcontext()

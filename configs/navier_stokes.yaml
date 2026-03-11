@@ -15,7 +15,7 @@ physics:
     omega: 0.5
     phase: 0.0
 time:
-  t_final: 4.974995255470276
+  t_final: 0.9949990510940552
   n_snapshots: 200
   dt_max: 0.001
 data:
@@ -44,7 +44,7 @@ data:
       channel_index: 0
       dt: null
     pdebench:
-      file_path: /Users/davidmillard/Documents/Projects/RSD_home/Residual-Spectrum-Diagnostic/external_data/pdebench/2D/NS_incom/ns_incom_inhom_2d_64_omega.h5
+      file_path: /home/djm3622/Residual-Spectrum-Diagnostic/external_data/pdebench/2D/NS_incom/ns_incom_inhom_2d_64_omega.h5
       dataset_key: omega
       layout: NTHW
       channel_index: 0
@@ -54,7 +54,7 @@ data:
       n_test: 1
       shuffle: true
       split_seed_offset: 1207
-      dt: 0.02499997615814209
+      dt: 0.004999995231628418
 training:
   device: mps
   loss: combined
