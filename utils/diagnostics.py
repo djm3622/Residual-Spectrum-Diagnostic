@@ -329,7 +329,7 @@ class ReactionDiffusionRSDAnalyzer:
 
         self.Du = config.Du
         self.Dv = config.Dv
-        self.F = config.F
+        self.F = 0.0 if bool(getattr(config, "rsd_assume_no_forcing", False)) else config.F
         self.k = config.k
 
         dx = config.Lx / config.nx

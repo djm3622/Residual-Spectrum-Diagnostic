@@ -53,6 +53,7 @@ class GrayScottConfig:
 
     omega_1_frac: float = 1 / 16
     omega_2_frac: float = 1 / 6
+    rsd_assume_no_forcing: bool = False
 
     @classmethod
     def from_yaml(cls, config: Dict) -> "GrayScottConfig":
@@ -105,6 +106,7 @@ class GrayScottConfig:
             train_early_step_decay=float(training.get("early_step_decay", 24.0)),
             omega_1_frac=float(rsd["omega_1_frac"]),
             omega_2_frac=float(rsd["omega_2_frac"]),
+            rsd_assume_no_forcing=bool(rsd.get("assume_no_forcing", False)),
         )
 
 

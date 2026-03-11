@@ -74,6 +74,7 @@ Each YAML controls all run parameters, including:
 - progress bars (`progress.enabled`, `progress.data_generation`, `progress.training`, `progress.evaluation`)
   - when training progress is enabled, tqdm shows `train_loss` and `val_loss` live
 - RSD projection basis (`rsd.basis`: `fourier`, `laplace`, `wavelet`, `svd`) and band settings (`omega_1_frac`, `omega_2_frac`)
+- optional RSD no-forcing residual mode for RD (`rsd.assume_no_forcing`: `true|false`)
 - output/checkpoint roots and artifact toggles
 - fit-visualization indices (`eval_pair_index`, `test_case_index`, `test_step_index`)
 
