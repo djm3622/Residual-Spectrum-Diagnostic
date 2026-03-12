@@ -19,8 +19,8 @@ time:
   n_snapshots: 101
   dt_max: 0.001
 data:
-  n_train_trajectories: 80
-  n_test_trajectories: 20
+  n_train_trajectories: 370
+  n_test_trajectories: 30
   initial_condition: line_wave
   initial_n_modes: 1
   initial_kmax: 1
@@ -52,8 +52,8 @@ data:
       channel_index: 0
       time_stride: 1
       spatial_stride: 1
-      n_train: 80
-      n_test: 20
+      n_train: 370
+      n_test: 30
       shuffle: true
       split_seed_offset: 1207
       dt: 0.019999980926513672
@@ -62,7 +62,7 @@ training:
   loss: l2
   noise_level: 0.04
   lr: 0.0003
-  n_iter: 300
+  n_iter: 100
   batch_size: 32
   grad_clip: 1.0
   rollout_horizon: 10
