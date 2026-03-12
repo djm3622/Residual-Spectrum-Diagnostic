@@ -61,4 +61,4 @@ def add_hf_noise_coupled(
     """Inject independent high-frequency noise into both fields of a coupled system."""
     u_noisy = add_hf_noise_2d(u, noise_level, nx, ny, Lx=Lx, Ly=Ly)
     v_noisy = add_hf_noise_2d(v, noise_level, nx, ny, Lx=Lx, Ly=Ly)
-    return np.clip(u_noisy, 0, 1), np.clip(v_noisy, 0, 1)
+    return u_noisy, v_noisy
