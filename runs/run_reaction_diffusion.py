@@ -156,6 +156,67 @@ def _sample_initial_condition(solver: GrayScottSolver, config: GrayScottConfig, 
     )
 
 
+def _extract_target_frame(target_window: np.ndarray, target_mode: str) -> np.ndarray:
+    if target_mode == "next_block":
+        return np.asarray(target_window[0], dtype=np.float32)
+    return np.asarray(target_window[-1], dtype=np.float32)
+
+
+def _noisy_reference_frame_coupled(
+    u_field: np.ndarray,
+    v_field: np.ndarray,
+    config: GrayScottConfig,
+    rng_seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    prev_state = np.random.get_state()
+    np.random.seed(int(rng_seed))
+    try:
+        u_noisy, v_noisy = add_hf_noise_coupled(
+            np.asarray(u_field, dtype=np.float32),
+            np.asarray(v_field, dtype=np.float32),
+            config.noise_level,
+            config.nx,
+            config.ny,
+            Lx=config.Lx,
+            Ly=config.Ly,
+        )
+    finally:
+        np.random.set_state(prev_state)
+    return np.asarray(u_noisy, dtype=np.float32), np.asarray(v_noisy, dtype=np.float32)
+
+
+def _noisy_reference_trajectory_coupled(
+    u_traj: np.ndarray,
+    v_traj: np.ndarray,
+    config: GrayScottConfig,
+    rng_seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    u_arr = np.asarray(u_traj, dtype=np.float32)
+    v_arr = np.asarray(v_traj, dtype=np.float32)
+    u_noisy = np.empty_like(u_arr, dtype=np.float32)
+    v_noisy = np.empty_like(v_arr, dtype=np.float32)
+
+    prev_state = np.random.get_state()
+    np.random.seed(int(rng_seed))
+    try:
+        for step in range(u_arr.shape[0]):
+            u_step_noisy, v_step_noisy = add_hf_noise_coupled(
+                u_arr[step],
+                v_arr[step],
+                config.noise_level,
+                config.nx,
+                config.ny,
+                Lx=config.Lx,
+                Ly=config.Ly,
+            )
+            u_noisy[step] = np.asarray(u_step_noisy, dtype=np.float32)
+            v_noisy[step] = np.asarray(v_step_noisy, dtype=np.float32)
+    finally:
+        np.random.set_state(prev_state)
+
+    return u_noisy, v_noisy
+
+
 def run_single_seed(
     config: GrayScottConfig,
     method: str,
@@ -594,6 +655,8 @@ def run_single_seed(
         eval_input_v_window = np.asarray(inputs_v[eval_pair_index], dtype=np.float32)
         eval_target_u_window = np.asarray(targets_u_clean[eval_pair_index], dtype=np.float32)
         eval_target_v_window = np.asarray(targets_v_clean[eval_pair_index], dtype=np.float32)
+        eval_target_u_window_noisy = np.asarray(targets_u_noisy[eval_pair_index], dtype=np.float32)
+        eval_target_v_window_noisy = np.asarray(targets_v_noisy[eval_pair_index], dtype=np.float32)
         eval_pred_u_window_clean, eval_pred_v_window_clean = model_clean.predict_window(
             eval_input_u_window,
             eval_input_v_window,
@@ -618,6 +681,8 @@ def run_single_seed(
             np.asarray(eval_pred_v_window_clean, dtype=np.float32),
             temporal_target_mode,
         )
+        eval_target_u_noisy = _extract_target_frame(eval_target_u_window_noisy, temporal_target_mode)
+        eval_target_v_noisy = _extract_target_frame(eval_target_v_window_noisy, temporal_target_mode)
         (
             _,
             _,
@@ -663,6 +728,12 @@ def run_single_seed(
             test_case["v_true"][target_start : target_start + temporal_window],
             dtype=np.float32,
         )
+        test_target_u_window_noisy, test_target_v_window_noisy = _noisy_reference_trajectory_coupled(
+            test_target_u_window,
+            test_target_v_window,
+            config,
+            rng_seed=seed * 1_000_000 + test_case_index * 10_000 + target_start,
+        )
         test_pred_u_window_clean, test_pred_v_window_clean = model_clean.predict_window(
             test_input_u_window,
             test_input_v_window,
@@ -687,6 +758,8 @@ def run_single_seed(
             np.asarray(test_pred_v_window_clean, dtype=np.float32),
             temporal_target_mode,
         )
+        test_target_u_noisy = _extract_target_frame(test_target_u_window_noisy, temporal_target_mode)
+        test_target_v_noisy = _extract_target_frame(test_target_v_window_noisy, temporal_target_mode)
         (
             _,
             _,
@@ -711,6 +784,8 @@ def run_single_seed(
         eval_input_v = inputs_v[eval_pair_index]
         eval_target_u = targets_u_clean[eval_pair_index]
         eval_target_v = targets_v_clean[eval_pair_index]
+        eval_target_u_noisy = np.asarray(targets_u_noisy[eval_pair_index], dtype=np.float32)
+        eval_target_v_noisy = np.asarray(targets_v_noisy[eval_pair_index], dtype=np.float32)
         eval_pred_u_clean, eval_pred_v_clean = model_clean.forward(eval_input_u, eval_input_v)
         eval_pred_u_noisy, eval_pred_v_noisy = model_noisy.forward(eval_input_u, eval_input_v)
 
@@ -718,6 +793,12 @@ def run_single_seed(
         test_input_v = test_case["v_true"][test_step_index]
         test_target_u = test_case["u_true"][test_step_index + 1]
         test_target_v = test_case["v_true"][test_step_index + 1]
+        test_target_u_noisy, test_target_v_noisy = _noisy_reference_frame_coupled(
+            test_target_u,
+            test_target_v,
+            config,
+            rng_seed=seed * 1_000_000 + test_case_index * 10_000 + test_step_index + 1,
+        )
         test_pred_u_clean, test_pred_v_clean = model_clean.forward(test_input_u, test_input_v)
         test_pred_u_noisy, test_pred_v_noisy = model_noisy.forward(test_input_u, test_input_v)
 
@@ -730,6 +811,8 @@ def run_single_seed(
                 "input_v": eval_input_v,
                 "target_u": eval_target_u,
                 "target_v": eval_target_v,
+                "target_u_noisy": eval_target_u_noisy,
+                "target_v_noisy": eval_target_v_noisy,
                 "pred_u_clean": eval_pred_u_clean,
                 "pred_v_clean": eval_pred_v_clean,
                 "pred_u_noisy": eval_pred_u_noisy,
@@ -740,6 +823,8 @@ def run_single_seed(
                 "input_v": test_input_v,
                 "target_u": test_target_u,
                 "target_v": test_target_v,
+                "target_u_noisy": test_target_u_noisy,
+                "target_v_noisy": test_target_v_noisy,
                 "pred_u_clean": test_pred_u_clean,
                 "pred_v_clean": test_pred_v_clean,
                 "pred_u_noisy": test_pred_u_noisy,
@@ -953,6 +1038,9 @@ def main() -> None:
             input_cmap=input_cmap,
             input_border_color=input_border_color,
             input_border_width=input_border_width,
+            target_u_noisy=viz_payload["eval"]["target_u_noisy"],
+            target_v_noisy=viz_payload["eval"]["target_v_noisy"],
+            model_label="Clean model",
         )
         save_coupled_fit_panel(
             viz_payload["eval"]["input_u"],
@@ -967,6 +1055,9 @@ def main() -> None:
             input_cmap=input_cmap,
             input_border_color=input_border_color,
             input_border_width=input_border_width,
+            target_u_noisy=viz_payload["eval"]["target_u_noisy"],
+            target_v_noisy=viz_payload["eval"]["target_v_noisy"],
+            model_label="Noisy model",
         )
         save_coupled_fit_panel(
             viz_payload["test"]["input_u"],
@@ -981,6 +1072,9 @@ def main() -> None:
             input_cmap=input_cmap,
             input_border_color=input_border_color,
             input_border_width=input_border_width,
+            target_u_noisy=viz_payload["test"]["target_u_noisy"],
+            target_v_noisy=viz_payload["test"]["target_v_noisy"],
+            model_label="Clean model",
         )
         save_coupled_fit_panel(
             viz_payload["test"]["input_u"],
@@ -995,6 +1089,9 @@ def main() -> None:
             input_cmap=input_cmap,
             input_border_color=input_border_color,
             input_border_width=input_border_width,
+            target_u_noisy=viz_payload["test"]["target_u_noisy"],
+            target_v_noisy=viz_payload["test"]["target_v_noisy"],
+            model_label="Noisy model",
         )
 
     if artifacts.get("save_trajectory_visualizations", True):
@@ -1035,31 +1132,44 @@ def main() -> None:
             if u_true is None or v_true is None or u_clean is None or v_clean is None or u_noisy is None or v_noisy is None:
                 continue
 
-            u_field_rows.append({"label": f"case {case_idx} | Truth", "traj": u_true})
-            u_field_rows.append({"label": f"case {case_idx} | Clean", "traj": u_clean})
-            u_field_rows.append({"label": f"case {case_idx} | Noisy", "traj": u_noisy})
+            u_truth_noisy, v_truth_noisy = _noisy_reference_trajectory_coupled(
+                u_true,
+                v_true,
+                config,
+                rng_seed=args.seed * 1_000_000 + case_idx * 10_000 + 421,
+            )
 
-            v_field_rows.append({"label": f"case {case_idx} | Truth", "traj": v_true})
-            v_field_rows.append({"label": f"case {case_idx} | Clean", "traj": v_clean})
-            v_field_rows.append({"label": f"case {case_idx} | Noisy", "traj": v_noisy})
+            u_field_rows.append({"label": f"case {case_idx} | Clean GT", "traj": u_true})
+            u_field_rows.append({"label": f"case {case_idx} | Noisy GT", "traj": u_truth_noisy})
+            u_field_rows.append({"label": f"case {case_idx} | Clean Pred", "traj": u_clean})
+            u_field_rows.append({"label": f"case {case_idx} | Noisy Pred", "traj": u_noisy})
 
-            u_rows.append({"label": f"case {case_idx} | Clean", "pred": u_clean, "target": u_true})
-            u_rows.append({"label": f"case {case_idx} | Noisy", "pred": u_noisy, "target": u_true})
-            v_rows.append({"label": f"case {case_idx} | Clean", "pred": v_clean, "target": v_true})
-            v_rows.append({"label": f"case {case_idx} | Noisy", "pred": v_noisy, "target": v_true})
+            v_field_rows.append({"label": f"case {case_idx} | Clean GT", "traj": v_true})
+            v_field_rows.append({"label": f"case {case_idx} | Noisy GT", "traj": v_truth_noisy})
+            v_field_rows.append({"label": f"case {case_idx} | Clean Pred", "traj": v_clean})
+            v_field_rows.append({"label": f"case {case_idx} | Noisy Pred", "traj": v_noisy})
+
+            u_rows.append({"label": f"case {case_idx} | Clean Pred vs Clean GT", "pred": u_clean, "target": u_true})
+            u_rows.append({"label": f"case {case_idx} | Noisy Pred vs Clean GT", "pred": u_noisy, "target": u_true})
+            u_rows.append({"label": f"case {case_idx} | Clean Pred vs Noisy GT", "pred": u_clean, "target": u_truth_noisy})
+            u_rows.append({"label": f"case {case_idx} | Noisy Pred vs Noisy GT", "pred": u_noisy, "target": u_truth_noisy})
+            v_rows.append({"label": f"case {case_idx} | Clean Pred vs Clean GT", "pred": v_clean, "target": v_true})
+            v_rows.append({"label": f"case {case_idx} | Noisy Pred vs Clean GT", "pred": v_noisy, "target": v_true})
+            v_rows.append({"label": f"case {case_idx} | Clean Pred vs Noisy GT", "pred": v_clean, "target": v_truth_noisy})
+            v_rows.append({"label": f"case {case_idx} | Noisy Pred vs Noisy GT", "pred": v_noisy, "target": v_truth_noisy})
 
         save_trajectory_field_rows(
             u_field_rows,
             step_indices=step_indices,
             output_path=fit_dir / "trajectory_u_fields.png",
-            title="Trajectory snapshots | Species u (truth, clean, noisy)",
+            title="Trajectory snapshots | Species u",
             cmap="turbo",
         )
         save_trajectory_field_rows(
             v_field_rows,
             step_indices=step_indices,
             output_path=fit_dir / "trajectory_v_fields.png",
-            title="Trajectory snapshots | Species v (truth, clean, noisy)",
+            title="Trajectory snapshots | Species v",
             cmap="turbo",
         )
 

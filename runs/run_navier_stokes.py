@@ -161,6 +161,56 @@ def _future_block_rel_l2(
     return _safe_mean(rel_errors)
 
 
+def _noisy_reference_field(
+    field: np.ndarray,
+    config: NSConfig,
+    rng_seed: int,
+) -> np.ndarray:
+    prev_state = np.random.get_state()
+    np.random.seed(int(rng_seed))
+    try:
+        noisy = add_hf_noise_2d(
+            np.asarray(field, dtype=np.float32),
+            config.noise_level,
+            config.nx,
+            config.ny,
+            Lx=config.Lx,
+            Ly=config.Ly,
+        )
+    finally:
+        np.random.set_state(prev_state)
+    return np.asarray(noisy, dtype=np.float32)
+
+
+def _noisy_reference_trajectory(
+    trajectory: np.ndarray,
+    config: NSConfig,
+    rng_seed: int,
+) -> np.ndarray:
+    traj = np.asarray(trajectory, dtype=np.float32)
+    noisy_traj = np.empty_like(traj, dtype=np.float32)
+
+    prev_state = np.random.get_state()
+    np.random.seed(int(rng_seed))
+    try:
+        for step in range(traj.shape[0]):
+            noisy_traj[step] = np.asarray(
+                add_hf_noise_2d(
+                    traj[step],
+                    config.noise_level,
+                    config.nx,
+                    config.ny,
+                    Lx=config.Lx,
+                    Ly=config.Ly,
+                ),
+                dtype=np.float32,
+            )
+    finally:
+        np.random.set_state(prev_state)
+
+    return noisy_traj
+
+
 def run_single_seed(
     config: NSConfig,
     method: str,
@@ -461,12 +511,19 @@ def run_single_seed(
     if temporal_enabled:
         eval_input_window = np.asarray(inputs[eval_pair_index], dtype=np.float32)
         eval_target_window = np.asarray(targets_clean[eval_pair_index], dtype=np.float32)
+        eval_target_window_noisy = np.asarray(targets_noisy[eval_pair_index], dtype=np.float32)
         eval_pred_window_clean = np.asarray(model_clean.predict_window(eval_input_window), dtype=np.float32)
         eval_pred_window_noisy = np.asarray(model_noisy.predict_window(eval_input_window), dtype=np.float32)
         eval_input, eval_target, eval_pred_clean = _extract_panel_frames(
             eval_input_window,
             eval_target_window,
             eval_pred_window_clean,
+            temporal_target_mode,
+        )
+        _, eval_target_noisy, _ = _extract_panel_frames(
+            eval_input_window,
+            eval_target_window_noisy,
+            eval_target_window_noisy,
             temporal_target_mode,
         )
         _, _, eval_pred_noisy = _extract_panel_frames(
@@ -496,12 +553,23 @@ def run_single_seed(
             test_case["omega_true"][target_start : target_start + temporal_window],
             dtype=np.float32,
         )
+        test_target_window_noisy = _noisy_reference_trajectory(
+            test_target_window,
+            config,
+            rng_seed=seed * 1_000_000 + test_case_index * 10_000 + target_start,
+        )
         test_pred_window_clean = np.asarray(model_clean.predict_window(test_input_window), dtype=np.float32)
         test_pred_window_noisy = np.asarray(model_noisy.predict_window(test_input_window), dtype=np.float32)
         test_input, test_target, test_pred_clean = _extract_panel_frames(
             test_input_window,
             test_target_window,
             test_pred_window_clean,
+            temporal_target_mode,
+        )
+        _, test_target_noisy, _ = _extract_panel_frames(
+            test_input_window,
+            test_target_window_noisy,
+            test_target_window_noisy,
             temporal_target_mode,
         )
         _, _, test_pred_noisy = _extract_panel_frames(
@@ -516,11 +584,17 @@ def run_single_seed(
 
         eval_input = inputs[eval_pair_index]
         eval_target = targets_clean[eval_pair_index]
+        eval_target_noisy = np.asarray(targets_noisy[eval_pair_index], dtype=np.float32)
         eval_pred_clean = model_clean.forward(eval_input)
         eval_pred_noisy = model_noisy.forward(eval_input)
 
         test_input = test_case["omega_true"][test_step_index]
         test_target = test_case["omega_true"][test_step_index + 1]
+        test_target_noisy = _noisy_reference_field(
+            test_target,
+            config,
+            rng_seed=seed * 1_000_000 + test_case_index * 10_000 + test_step_index + 1,
+        )
         test_pred_clean = model_clean.forward(test_input)
         test_pred_noisy = model_noisy.forward(test_input)
 
@@ -531,12 +605,14 @@ def run_single_seed(
             "eval": {
                 "input": eval_input,
                 "target": eval_target,
+                "target_noisy": eval_target_noisy,
                 "pred_clean": eval_pred_clean,
                 "pred_noisy": eval_pred_noisy,
             },
             "test": {
                 "input": test_input,
                 "target": test_target,
+                "target_noisy": test_target_noisy,
                 "pred_clean": test_pred_clean,
                 "pred_noisy": test_pred_noisy,
             },
@@ -726,6 +802,8 @@ def main() -> None:
             input_cmap=input_cmap,
             input_border_color=input_border_color,
             input_border_width=input_border_width,
+            target_field_noisy=viz_payload["eval"]["target_noisy"],
+            model_label="Clean model",
         )
         save_scalar_fit_panel(
             viz_payload["eval"]["input"],
@@ -737,6 +815,8 @@ def main() -> None:
             input_cmap=input_cmap,
             input_border_color=input_border_color,
             input_border_width=input_border_width,
+            target_field_noisy=viz_payload["eval"]["target_noisy"],
+            model_label="Noisy model",
         )
         save_scalar_fit_panel(
             viz_payload["test"]["input"],
@@ -748,6 +828,8 @@ def main() -> None:
             input_cmap=input_cmap,
             input_border_color=input_border_color,
             input_border_width=input_border_width,
+            target_field_noisy=viz_payload["test"]["target_noisy"],
+            model_label="Clean model",
         )
         save_scalar_fit_panel(
             viz_payload["test"]["input"],
@@ -759,6 +841,8 @@ def main() -> None:
             input_cmap=input_cmap,
             input_border_color=input_border_color,
             input_border_width=input_border_width,
+            target_field_noisy=viz_payload["test"]["target_noisy"],
+            model_label="Noisy model",
         )
 
     if artifacts.get("save_trajectory_visualizations", True):
@@ -791,18 +875,27 @@ def main() -> None:
             if omega_true is None or omega_clean is None or omega_noisy is None:
                 continue
 
-            field_rows.append({"label": f"case {case_idx} | Truth", "traj": omega_true})
-            field_rows.append({"label": f"case {case_idx} | Clean", "traj": omega_clean})
-            field_rows.append({"label": f"case {case_idx} | Noisy", "traj": omega_noisy})
+            omega_truth_noisy = _noisy_reference_trajectory(
+                omega_true,
+                config,
+                rng_seed=args.seed * 1_000_000 + case_idx * 10_000 + 421,
+            )
 
-            error_rows.append({"label": f"case {case_idx} | Clean", "pred": omega_clean, "target": omega_true})
-            error_rows.append({"label": f"case {case_idx} | Noisy", "pred": omega_noisy, "target": omega_true})
+            field_rows.append({"label": f"case {case_idx} | Clean GT", "traj": omega_true})
+            field_rows.append({"label": f"case {case_idx} | Noisy GT", "traj": omega_truth_noisy})
+            field_rows.append({"label": f"case {case_idx} | Clean Pred", "traj": omega_clean})
+            field_rows.append({"label": f"case {case_idx} | Noisy Pred", "traj": omega_noisy})
+
+            error_rows.append({"label": f"case {case_idx} | Clean Pred vs Clean GT", "pred": omega_clean, "target": omega_true})
+            error_rows.append({"label": f"case {case_idx} | Noisy Pred vs Clean GT", "pred": omega_noisy, "target": omega_true})
+            error_rows.append({"label": f"case {case_idx} | Clean Pred vs Noisy GT", "pred": omega_clean, "target": omega_truth_noisy})
+            error_rows.append({"label": f"case {case_idx} | Noisy Pred vs Noisy GT", "pred": omega_noisy, "target": omega_truth_noisy})
 
         save_trajectory_field_rows(
             field_rows,
             step_indices=step_indices,
             output_path=fit_dir / "trajectory_omega_fields.png",
-            title="Trajectory snapshots | Vorticity (truth, clean, noisy)",
+            title="Trajectory snapshots | Vorticity",
             cmap="RdYlBu_r",
         )
         save_trajectory_error_rows(
