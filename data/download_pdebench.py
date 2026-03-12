@@ -8,6 +8,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -200,13 +201,41 @@ def filter_rows(
             selected = [
                 row
                 for row in selected
-                if any(fragment in str(row["Filename"]) for fragment in filters)
+                if any(_filename_fragment_matches(str(row["Filename"]), fragment) for fragment in filters)
             ]
 
     if max_files > 0:
         selected = selected[:max_files]
 
     return selected
+
+
+def _strip_numeric_zero_padding(text: str) -> str:
+    """Collapse zero-padded numeric tokens (e.g. 049 -> 49) inside freeform text."""
+
+    def _repl(match: re.Match[str]) -> str:
+        prefix, digits, suffix = match.group(1), match.group(2), match.group(3)
+        return f"{prefix}{int(digits)}{suffix}"
+
+    return re.sub(r"(^|[^0-9])0+([0-9]+)([^0-9]|$)", _repl, text)
+
+
+def _filename_fragment_matches(filename: str, fragment: str) -> bool:
+    """
+    Case-insensitive substring match with a zero-padding fallback.
+    This allows filters like '...512-049.h5' to match real files named '...512-49.h5'.
+    """
+    filename_norm = filename.strip().lower()
+    fragment_norm = fragment.strip().lower()
+    if not fragment_norm:
+        return False
+    if fragment_norm in filename_norm:
+        return True
+
+    depadded_fragment = _strip_numeric_zero_padding(fragment_norm)
+    if depadded_fragment != fragment_norm and depadded_fragment in filename_norm:
+        return True
+    return False
 
 
 def md5sum(path: Path, chunk_size: int = 1024 * 1024) -> str:
