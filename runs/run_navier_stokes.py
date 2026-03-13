@@ -8,11 +8,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
 import numpy as np
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -31,6 +33,17 @@ from utils.io import build_run_dirs, save_checkpoint, save_json
 from utils.noise import add_hf_noise_2d
 from utils.progress import progress_iter
 from utils.torch_runtime import DEVICE_CHOICES
+
+
+def _move_model_device(model: Any, device_name: str) -> None:
+    """Move the underlying torch module when available (best-effort)."""
+    net = getattr(model, "net", None)
+    if net is None:
+        return
+    try:
+        net.to(device_name)
+    except Exception:
+        return
 
 
 def _safe_mean(values: List[float]) -> float:
@@ -397,18 +410,6 @@ def run_single_seed(
         model_depth=config.train_model_depth,
         operator_config=operator_config,
     )
-    model_noisy = build_model(
-        method,
-        config.nx,
-        config.ny,
-        seed=seed + 10000,
-        device=device,
-        loss=loss,
-        model_width=config.train_model_width,
-        model_depth=config.train_model_depth,
-        operator_config=operator_config,
-    )
-
     model_clean.train(
         inputs,
         targets_clean,
@@ -423,6 +424,23 @@ def run_single_seed(
         val_targets=val_targets_clean,
         show_progress=show_training_progress,
         progress_desc="Training clean model",
+    )
+    if str(device).lower() == "cuda":
+        _move_model_device(model_clean, "cpu")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    model_noisy = build_model(
+        method,
+        config.nx,
+        config.ny,
+        seed=seed + 10000,
+        device=device,
+        loss=loss,
+        model_width=config.train_model_width,
+        model_depth=config.train_model_depth,
+        operator_config=operator_config,
     )
     model_noisy.train(
         inputs_noisy,
@@ -439,6 +457,11 @@ def run_single_seed(
         show_progress=show_training_progress,
         progress_desc="Training noisy model",
     )
+    if str(device).lower() == "cuda":
+        _move_model_device(model_clean, "cuda")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     metrics = {
         "clean_l2": [],

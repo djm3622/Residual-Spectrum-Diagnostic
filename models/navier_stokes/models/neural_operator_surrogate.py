@@ -135,13 +135,25 @@ class NeuralOperatorSurrogate2D:
 
     def _fit_normalizers(self, x_train: torch.Tensor, y_train: torch.Tensor) -> None:
         reduce_dims = tuple(idx for idx in range(x_train.ndim) if idx != 1)
-        self.input_mean = torch.mean(x_train, dim=reduce_dims, keepdim=True).to(torch.float32)
-        self.input_std = torch.std(x_train, dim=reduce_dims, keepdim=True, unbiased=False).to(torch.float32)
+        self.input_mean = torch.mean(x_train, dim=reduce_dims, keepdim=True).to(
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.input_std = torch.std(x_train, dim=reduce_dims, keepdim=True, unbiased=False).to(
+            device=self.device,
+            dtype=torch.float32,
+        )
         self.input_std = torch.clamp(self.input_std, min=1e-6)
 
         target_reduce_dims = tuple(idx for idx in range(y_train.ndim) if idx != 1)
-        self.target_mean = torch.mean(y_train, dim=target_reduce_dims, keepdim=True).to(torch.float32)
-        self.target_std = torch.std(y_train, dim=target_reduce_dims, keepdim=True, unbiased=False).to(torch.float32)
+        self.target_mean = torch.mean(y_train, dim=target_reduce_dims, keepdim=True).to(
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.target_std = torch.std(y_train, dim=target_reduce_dims, keepdim=True, unbiased=False).to(
+            device=self.device,
+            dtype=torch.float32,
+        )
         self.target_std = torch.clamp(self.target_std, min=1e-6)
 
     def _predict_batch(self, x: torch.Tensor) -> torch.Tensor:
@@ -261,8 +273,8 @@ class NeuralOperatorSurrogate2D:
                     f"(got x={x_arr.shape}, y={y_arr.shape})."
                 )
 
-        x_train = torch.from_numpy(x_arr[:, np.newaxis, ...]).to(self.device)
-        y_train = torch.from_numpy(y_arr[:, np.newaxis, ...]).to(self.device)
+        x_train = torch.from_numpy(x_arr[:, np.newaxis, ...])
+        y_train = torch.from_numpy(y_arr[:, np.newaxis, ...])
         self._fit_normalizers(x_train, y_train)
         has_val = (
             val_inputs is not None
@@ -273,8 +285,8 @@ class NeuralOperatorSurrogate2D:
         if has_val:
             x_val_arr = np.asarray(val_inputs, dtype=np.float32)
             y_val_arr = np.asarray(val_targets, dtype=np.float32)
-            x_val = torch.from_numpy(x_val_arr[:, np.newaxis, ...]).to(self.device)
-            y_val = torch.from_numpy(y_val_arr[:, np.newaxis, ...]).to(self.device)
+            x_val = torch.from_numpy(x_val_arr[:, np.newaxis, ...])
+            y_val = torch.from_numpy(y_val_arr[:, np.newaxis, ...])
         else:
             x_val = None
             y_val = None
@@ -293,7 +305,7 @@ class NeuralOperatorSurrogate2D:
             and len(trajectory) > 0
         )
         if use_rollout:
-            seq = torch.from_numpy(np.asarray(trajectory, dtype=np.float32)).to(self.device)
+            seq = torch.from_numpy(np.asarray(trajectory, dtype=np.float32))
             n_traj, n_steps, _, _ = seq.shape
             max_start = n_steps - horizon - 1
             if max_start < 0:
@@ -317,8 +329,8 @@ class NeuralOperatorSurrogate2D:
             count = 0
             with torch.inference_mode():
                 for start in range(0, x_val.shape[0], batch):
-                    xb_val = x_val[start : start + batch]
-                    yb_val = y_val[start : start + batch]
+                    xb_val = x_val[start : start + batch].to(self.device, non_blocking=True)
+                    yb_val = y_val[start : start + batch].to(self.device, non_blocking=True)
                     with train_autocast(self.device):
                         pred_val = self._predict_batch(xb_val)
                         loss_val = self.objective_loss(
@@ -343,11 +355,11 @@ class NeuralOperatorSurrogate2D:
         for _ in iter_progress:
             train_loss_sum = 0.0
             train_loss_count = 0
-            perm = torch.randperm(n_samples, device=self.device)
+            perm = torch.randperm(n_samples)
             for start in range(0, n_samples, batch):
                 idx = perm[start : start + batch]
-                xb = x_train.index_select(0, idx)
-                yb = y_train.index_select(0, idx)
+                xb = x_train.index_select(0, idx).to(self.device, non_blocking=True)
+                yb = y_train.index_select(0, idx).to(self.device, non_blocking=True)
 
                 with train_autocast(self.device):
                     pred = self._predict_batch(xb)
@@ -358,13 +370,16 @@ class NeuralOperatorSurrogate2D:
 
                     rollout_loss = torch.zeros((), device=self.device, dtype=one_step_loss.dtype)
                     if use_rollout and seq is not None and rollout_batch > 0:
-                        traj_idx = torch.randint(0, seq.shape[0], (rollout_batch,), device=self.device)
-                        start_idx = torch.randint(0, max_start + 1, (rollout_batch,), device=self.device)
+                        traj_idx = torch.randint(0, seq.shape[0], (rollout_batch,))
+                        start_idx = torch.randint(0, max_start + 1, (rollout_batch,))
 
-                        state_roll = seq[traj_idx, start_idx].unsqueeze(1)
+                        state_roll = seq[traj_idx, start_idx].unsqueeze(1).to(self.device, non_blocking=True)
                         for offset in range(1, horizon + 1):
                             pred_roll = self._predict_batch(state_roll)
-                            target_roll = seq[traj_idx, start_idx + offset].unsqueeze(1)
+                            target_roll = seq[traj_idx, start_idx + offset].unsqueeze(1).to(
+                                self.device,
+                                non_blocking=True,
+                            )
                             rollout_loss = rollout_loss + self.objective_loss(
                                 self._scaled_state(pred_roll),
                                 self._scaled_state(target_roll),
