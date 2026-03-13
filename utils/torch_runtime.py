@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import Iterable
+from typing import Any, Iterable
 
 import torch
 
@@ -83,6 +83,30 @@ def build_adam_optimizer(
         except (TypeError, RuntimeError):
             pass
     return torch.optim.Adam(params, lr=lr, weight_decay=wd)
+
+
+def move_optimizer_state_to_device(
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+) -> None:
+    """Move all tensor values in optimizer state dict to ``device`` in-place."""
+
+    def _move(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            return value.to(device=device, non_blocking=(device.type == "cuda"))
+        if isinstance(value, dict):
+            return {key: _move(sub_value) for key, sub_value in value.items()}
+        if isinstance(value, list):
+            return [_move(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(_move(item) for item in value)
+        return value
+
+    for param_state in optimizer.state.values():
+        if not isinstance(param_state, dict):
+            continue
+        for key, value in list(param_state.items()):
+            param_state[key] = _move(value)
 
 
 def build_grad_scaler(device: torch.device) -> torch.cuda.amp.GradScaler | None:

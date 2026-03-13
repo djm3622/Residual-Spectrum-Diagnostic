@@ -29,7 +29,7 @@ Structured repo for RSD experiments on:
 All runs use:
 
 ```bash
-python3 runs/<entry_script>.py <config.yaml> <method> <seed_number> [--device <auto|cpu|cuda|mps>] [--loss <combined|l2|l1|spectral_decay|energy>] [--basis <fourier|laplace|wavelet|svd>]
+python3 runs/<entry_script>.py <config.yaml> <method> <seed_number> [--device <auto|cpu|cuda|mps>] [--loss <combined|l2|l1|spectral_decay|energy>] [--basis <fourier|laplace|wavelet|svd>] [--resume-clean-checkpoint <path>] [--resume-noisy-checkpoint <path>]
 ```
 
 Examples:
@@ -65,6 +65,7 @@ Each YAML controls all run parameters, including:
 - training hyperparameters (`noise_level`, `lr`, `n_iter`, `batch_size`, `grad_clip`, `weight_decay`)
 - optional one-cycle learning-rate schedule (`training.use_one_cycle_lr`, `training.one_cycle_pct_start`, `training.one_cycle_div_factor`, `training.one_cycle_final_div_factor`)
 - checkpoint cadence (`training.checkpoint_every_epochs`, default `20`)
+- early stopping patience in epochs (`training.early_stopping_patience`, default `20`; disabled when no validation split)
 - rollout-stability controls (`training.rollout_horizon`, `training.rollout_weight`)
 - validation monitoring split (`training.validation_fraction`) used only for progress reporting
 - coupled-species balancing controls (`training.u_weight`, `training.v_weight`, `training.channel_balance_cap`)
@@ -173,6 +174,10 @@ Each run writes to deterministic paths:
 - `checkpoints/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/model_clean.npz`
 - `checkpoints/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/model_noisy.npz`
 - `checkpoints/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/model_<clean|noisy>_epoch_XXXX.npz` (saved every `training.checkpoint_every_epochs`)
+- `checkpoints/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/model_<clean|noisy>_best.npz` (lowest validation loss checkpoint)
+
+Checkpoint files now store full training state (model weights, optimizer, scheduler, AMP grad-scaler, and RNG state) so runs can be resumed from the exact saved epoch.
+Use `--resume-clean-checkpoint <path>` and/or `--resume-noisy-checkpoint <path>` to resume either phase directly.
 
 `results.json` now includes, in addition to L2/HFV/LFV:
 - space-time PDE residual metrics (`clean/noisy_pde_residual_st_rms`, plus `u/v` components for RD)

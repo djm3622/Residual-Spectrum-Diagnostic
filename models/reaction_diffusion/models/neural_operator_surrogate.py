@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
@@ -14,8 +15,8 @@ from utils.torch_runtime import (
     build_grad_scaler,
     configure_torch_backend,
     maybe_disable_grad_scaler_for_complex_params,
+    move_optimizer_state_to_device,
     resolve_torch_device,
-    maybe_disable_grad_scaler_for_complex_params,
     train_autocast,
 )
 
@@ -283,7 +284,9 @@ class NeuralOperatorSurrogate2DCoupled:
         val_targets_u: List[np.ndarray] | None = None,
         val_targets_v: List[np.ndarray] | None = None,
         pair_steps: List[int] | None = None,
-        checkpoint_callback: Callable[[int], None] | None = None,
+        checkpoint_callback: Callable[[int, float, Dict[str, Any]], None] | None = None,
+        early_stopping_patience: int | None = None,
+        resume_state: Dict[str, Any] | None = None,
         u_weight: float = 1.0,
         v_weight: float = 1.0,
         channel_balance_cap: float = 3.0,
@@ -379,6 +382,16 @@ class NeuralOperatorSurrogate2DCoupled:
         horizon = max(1, int(rollout_horizon))
         rollout_w = max(0.0, float(rollout_weight))
         dynamics_w = max(0.0, float(dynamics_weight))
+        patience_raw = int(early_stopping_patience) if early_stopping_patience is not None else 0
+        patience = max(1, patience_raw) if patience_raw > 0 else None
+        monitor_validation = has_val and (
+            show_progress
+            or checkpoint_callback is not None
+            or patience is not None
+        )
+        best_val_loss = float("inf")
+        epochs_without_improvement = 0
+        best_state: Dict[str, torch.Tensor] | None = None
 
         early_bias = max(0.0, float(early_step_bias))
         early_decay = max(1.0, float(early_step_decay))
@@ -440,6 +453,107 @@ class NeuralOperatorSurrogate2DCoupled:
                 div_factor=div_factor,
                 final_div_factor=final_div_factor,
             )
+        start_epoch = 1
+        if isinstance(resume_state, dict):
+            model_state = resume_state.get("model_state")
+            if isinstance(model_state, dict):
+                self.net.load_state_dict(model_state)
+            optimizer_state = resume_state.get("optimizer_state")
+            if isinstance(optimizer_state, dict):
+                optimizer.load_state_dict(optimizer_state)
+                move_optimizer_state_to_device(optimizer, self.device)
+            scheduler_state = resume_state.get("scheduler_state")
+            if scheduler is not None and isinstance(scheduler_state, dict):
+                scheduler.load_state_dict(scheduler_state)
+            grad_scaler_state = resume_state.get("grad_scaler_state")
+            if self.grad_scaler is not None and isinstance(grad_scaler_state, dict):
+                self.grad_scaler.load_state_dict(grad_scaler_state)
+            rng_state = resume_state.get("rng_state")
+            if isinstance(rng_state, dict):
+                python_state = rng_state.get("python")
+                if python_state is not None:
+                    try:
+                        random.setstate(python_state)
+                    except Exception:
+                        pass
+                numpy_state = rng_state.get("numpy")
+                if numpy_state is not None:
+                    try:
+                        np.random.set_state(numpy_state)
+                    except Exception:
+                        pass
+                torch_state = rng_state.get("torch")
+                if isinstance(torch_state, torch.Tensor):
+                    try:
+                        torch.set_rng_state(torch_state.cpu())
+                    except Exception:
+                        pass
+                torch_cuda_state = rng_state.get("torch_cuda")
+                if torch.cuda.is_available() and isinstance(torch_cuda_state, list):
+                    try:
+                        torch.cuda.set_rng_state_all(
+                            [
+                                state.cpu() if isinstance(state, torch.Tensor) else state
+                                for state in torch_cuda_state
+                            ]
+                        )
+                    except Exception:
+                        pass
+            best_val_loss = float(resume_state.get("best_val_loss", best_val_loss))
+            epochs_without_improvement = int(
+                max(0, int(resume_state.get("epochs_without_improvement", epochs_without_improvement)))
+            )
+            best_model_state = resume_state.get("best_model_state")
+            if isinstance(best_model_state, dict):
+                best_state = {
+                    key: value.detach().cpu().clone()
+                    if isinstance(value, torch.Tensor)
+                    else torch.as_tensor(value).detach().cpu().clone()
+                    for key, value in best_model_state.items()
+                }
+            elif np.isfinite(best_val_loss):
+                best_state = {
+                    key: value.detach().cpu().clone()
+                    for key, value in self.net.state_dict().items()
+                }
+            start_epoch = max(1, int(resume_state.get("epoch", 0)) + 1)
+
+        def _capture_training_state(epoch_idx: int, val_loss_value: float) -> Dict[str, Any]:
+            cuda_rng_state = None
+            if torch.cuda.is_available():
+                try:
+                    cuda_rng_state = [state.cpu() for state in torch.cuda.get_rng_state_all()]
+                except Exception:
+                    cuda_rng_state = None
+            return {
+                "epoch": int(epoch_idx),
+                "val_loss": float(val_loss_value) if np.isfinite(val_loss_value) else float("nan"),
+                "model_state": {
+                    key: value.detach().cpu().clone()
+                    for key, value in self.net.state_dict().items()
+                },
+                "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+                "grad_scaler_state": self.grad_scaler.state_dict() if self.grad_scaler is not None else None,
+                "rng_state": {
+                    "python": random.getstate(),
+                    "numpy": np.random.get_state(),
+                    "torch": torch.get_rng_state().cpu(),
+                    "torch_cuda": cuda_rng_state,
+                },
+                "best_val_loss": float(best_val_loss) if np.isfinite(best_val_loss) else float("inf"),
+                "epochs_without_improvement": int(epochs_without_improvement),
+                "best_model_state": (
+                    {
+                        key: value.detach().cpu().clone()
+                        for key, value in best_state.items()
+                    }
+                    if best_state is not None
+                    else None
+                ),
+                "loss_name": str(self.loss_name),
+                "temporal_enabled": bool(self.temporal_enabled),
+            }
 
         def _compute_validation_loss() -> float:
             if not has_val or x_val is None or y_val is None:
@@ -479,8 +593,13 @@ class NeuralOperatorSurrogate2DCoupled:
 
         self.net.train()
         iter_desc = progress_desc or "Training iterations"
-        iter_progress = progress_range(total_iter, enabled=show_progress, desc=iter_desc)
-        for epoch_idx, _ in enumerate(iter_progress, start=1):
+        if start_epoch > total_iter:
+            self.net.eval()
+            return
+        remaining_iter = total_iter - start_epoch + 1
+        iter_progress = progress_range(remaining_iter, enabled=show_progress, desc=iter_desc)
+        for iter_offset, _ in enumerate(iter_progress):
+            epoch_idx = start_epoch + iter_offset
             train_loss_sum = 0.0
             train_loss_count = 0
             if sample_weights is not None:
@@ -552,11 +671,11 @@ class NeuralOperatorSurrogate2DCoupled:
                 if scheduler is not None:
                     scheduler.step()
 
+            val_loss_value = _compute_validation_loss() if monitor_validation else float("nan")
             if show_progress and hasattr(iter_progress, "set_postfix"):
                 train_loss_value = (
                     train_loss_sum / float(train_loss_count) if train_loss_count > 0 else float("nan")
                 )
-                val_loss_value = _compute_validation_loss()
                 lr_value = float(optimizer.param_groups[0]["lr"])
                 postfix = {
                     "train_loss": f"{train_loss_value:.3e}" if np.isfinite(train_loss_value) else "nan",
@@ -564,8 +683,23 @@ class NeuralOperatorSurrogate2DCoupled:
                     "lr": f"{lr_value:.2e}",
                 }
                 iter_progress.set_postfix(postfix, refresh=False)
+            if patience is not None and has_val:
+                if np.isfinite(val_loss_value) and float(val_loss_value) < (best_val_loss - 1e-12):
+                    best_val_loss = float(val_loss_value)
+                    best_state = {
+                        key: value.detach().cpu().clone()
+                        for key, value in self.net.state_dict().items()
+                    }
+                    epochs_without_improvement = 0
+                else:
+                    epochs_without_improvement += 1
+            training_state = _capture_training_state(epoch_idx, float(val_loss_value))
             if checkpoint_callback is not None:
-                checkpoint_callback(epoch_idx)
+                checkpoint_callback(epoch_idx, float(val_loss_value), training_state)
+            if patience is not None and has_val and epochs_without_improvement >= patience:
+                break
+        if best_state is not None:
+            self.net.load_state_dict(best_state)
         self.net.eval()
 
     def state_dict(self) -> Dict[str, np.ndarray]:

@@ -21,336 +21,30 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.navier_stokes import NSConfig
-from data.navier_stokes_external import (
+from data.navier_stokes.external import (
     ExternalNavierStokesDataConfig,
     external_data_config_from_yaml,
     load_navier_stokes_trajectory_data,
 )
+from evaluatin.metrics import build_metric_vs_l2 as _build_metric_vs_l2
+from evaluatin.metrics import safe_mean as _safe_mean
+from evaluatin.navier_stokes import block_future_step_indices as _block_future_step_indices
+from evaluatin.navier_stokes import extract_panel_frames as _extract_panel_frames
+from evaluatin.navier_stokes import future_block_rel_l2 as _future_block_rel_l2
 from models.navier_stokes import LOSS_CHOICES, build_model, normalize_loss_name, rollout_2d
+from runs.helpers.common import load_best_checkpoint_for_eval as _load_best_checkpoint_for_eval
+from runs.helpers.common import move_model_device as _move_model_device
+from runs.helpers.navier_stokes_training import build_supervised_pairs as _build_supervised_pairs
+from runs.helpers.navier_stokes_training import noisy_reference_field as _noisy_reference_field
+from runs.helpers.navier_stokes_training import noisy_reference_trajectory as _noisy_reference_trajectory
+from runs.helpers.temporal import resolve_temporal_training_config as _resolve_temporal_training_config
+from runs.helpers.temporal import window_start_indices as _window_start_indices
+from runs.helpers.temporal import window_target_start as _window_target_start
 from utils.config import load_yaml_config
 from utils.diagnostics import BASIS_CHOICES, NavierStokesRSDAnalyzer, normalize_basis_name
-from utils.io import build_run_dirs, save_checkpoint, save_json
-from utils.noise import add_hf_noise_2d
+from utils.io import build_run_dirs, load_checkpoint, save_checkpoint, save_json
 from utils.progress import progress_iter
 from utils.torch_runtime import DEVICE_CHOICES
-
-
-def _move_model_device(model: Any, device_name: str) -> None:
-    """Move the underlying torch module when available (best-effort)."""
-    net = getattr(model, "net", None)
-    if net is None:
-        return
-    try:
-        net.to(device_name)
-    except Exception:
-        return
-
-
-def _safe_mean(values: List[float]) -> float:
-    """Mean over finite values, preserving NaN only when all values are non-finite."""
-    arr = np.asarray(values, dtype=float)
-    finite = arr[np.isfinite(arr)]
-    if finite.size == 0:
-        return float("nan")
-    return float(np.mean(finite))
-
-
-def _safe_pearson_corr(x: List[float], y: List[float]) -> float:
-    x_arr = np.asarray(x, dtype=np.float64).reshape(-1)
-    y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
-    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
-    if int(np.count_nonzero(mask)) < 2:
-        return float("nan")
-
-    x_valid = x_arr[mask]
-    y_valid = y_arr[mask]
-    x_center = x_valid - np.mean(x_valid)
-    y_center = y_valid - np.mean(y_valid)
-    denom = float(np.sqrt(np.sum(x_center * x_center) * np.sum(y_center * y_center)))
-    if denom <= 1e-12:
-        return float("nan")
-    return float(np.sum(x_center * y_center) / denom)
-
-
-def _rankdata_average(values: np.ndarray) -> np.ndarray:
-    arr = np.asarray(values, dtype=np.float64).reshape(-1)
-    if arr.size == 0:
-        return arr
-    order = np.argsort(arr, kind="mergesort")
-    sorted_arr = arr[order]
-    ranks = np.empty(arr.size, dtype=np.float64)
-
-    start = 0
-    while start < arr.size:
-        end = start + 1
-        while end < arr.size and sorted_arr[end] == sorted_arr[start]:
-            end += 1
-        avg_rank = 0.5 * float(start + end - 1)
-        ranks[order[start:end]] = avg_rank
-        start = end
-    return ranks
-
-
-def _safe_spearman_corr(x: List[float], y: List[float]) -> float:
-    x_arr = np.asarray(x, dtype=np.float64).reshape(-1)
-    y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
-    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
-    if int(np.count_nonzero(mask)) < 2:
-        return float("nan")
-
-    x_rank = _rankdata_average(x_arr[mask])
-    y_rank = _rankdata_average(y_arr[mask])
-    return _safe_pearson_corr(x_rank.tolist(), y_rank.tolist())
-
-
-def _build_metric_vs_l2(
-    metrics: Mapping[str, List[float]],
-    metric_ids: List[str],
-) -> Dict[str, Dict[str, Dict[str, float]]]:
-    output: Dict[str, Dict[str, Dict[str, float]]] = {"clean": {}, "noisy": {}}
-    for split in ("clean", "noisy"):
-        l2_key = f"{split}_l2"
-        l2_values = list(metrics.get(l2_key, []))
-        for metric_id in metric_ids:
-            metric_key = f"{split}_{metric_id}"
-            metric_values = list(metrics.get(metric_key, []))
-            x_arr = np.asarray(l2_values, dtype=np.float64)
-            y_arr = np.asarray(metric_values, dtype=np.float64)
-            valid_mask = np.isfinite(x_arr) & np.isfinite(y_arr)
-            output[split][metric_id] = {
-                "pearson": _safe_pearson_corr(l2_values, metric_values),
-                "spearman": _safe_spearman_corr(l2_values, metric_values),
-                "n": int(np.count_nonzero(valid_mask)),
-            }
-    return output
-
-
-def _normalize_method_name(method: str) -> str:
-    return str(method).strip().lower().replace("-", "_")
-
-
-def _resolve_temporal_training_config(method: str, operator_config: Mapping[str, Any] | None) -> Dict[str, Any]:
-    normalized_method = _normalize_method_name(method)
-    if normalized_method not in {"fno", "tfno", "uno", "neuralop_fno", "neuralop_tfno", "neuralop_uno", "operator_fno", "operator_tfno", "operator_uno"}:
-        return {"enabled": False, "input_steps": 1, "target_mode": "shifted"}
-
-    if not isinstance(operator_config, Mapping):
-        return {"enabled": False, "input_steps": 1, "target_mode": "shifted"}
-
-    common = operator_config.get("common", {})
-    specific_key = "fno"
-    if "tfno" in normalized_method:
-        specific_key = "tfno"
-    elif "uno" in normalized_method:
-        specific_key = "uno"
-
-    merged: Dict[str, Any] = {}
-    if isinstance(common, Mapping):
-        merged.update(common)
-    specific = operator_config.get(specific_key, {})
-    if isinstance(specific, Mapping):
-        merged.update(specific)
-
-    temporal = merged.get("temporal", {})
-    if not isinstance(temporal, Mapping):
-        return {"enabled": False, "input_steps": 1, "target_mode": "shifted"}
-
-    enabled = bool(temporal.get("enabled", False))
-    input_steps = max(2, int(temporal.get("input_steps", 20))) if enabled else 1
-    target_mode = str(temporal.get("target_mode", "shifted")).strip().lower().replace("-", "_")
-    if target_mode not in {"shifted", "next_block"}:
-        target_mode = "shifted"
-    return {"enabled": enabled, "input_steps": input_steps, "target_mode": target_mode}
-
-
-def _window_start_indices(n_steps: int, window: int, target_mode: str) -> range:
-    if target_mode == "next_block":
-        max_start = n_steps - (2 * window)
-    else:
-        max_start = n_steps - window - 1
-    if max_start < 0:
-        return range(0, 0)
-    return range(0, max_start + 1)
-
-
-def _window_target_start(start: int, window: int, target_mode: str) -> int:
-    if target_mode == "next_block":
-        return start + window
-    return start + 1
-
-
-def _extract_panel_frames(
-    input_window: np.ndarray,
-    target_window: np.ndarray,
-    pred_window: np.ndarray,
-    target_mode: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if target_mode == "next_block":
-        return (
-            np.asarray(input_window[-1], dtype=np.float32),
-            np.asarray(target_window[-1], dtype=np.float32),
-            np.asarray(pred_window[-1], dtype=np.float32),
-        )
-    return (
-        np.asarray(input_window[-1], dtype=np.float32),
-        np.asarray(target_window[-1], dtype=np.float32),
-        np.asarray(pred_window[-1], dtype=np.float32),
-    )
-
-
-def _block_future_step_indices(
-    n_snapshots: int,
-    block_size: int,
-    max_points: int = 6,
-) -> List[int]:
-    """Choose evenly interpretable future checkpoints for block-prediction models."""
-    n_steps = max(1, int(n_snapshots))
-    stride = max(1, int(block_size))
-    if n_steps == 1:
-        return [0]
-
-    steps = [0]
-    step = stride
-    while step < n_steps and len(steps) < max_points:
-        steps.append(step)
-        step += stride
-    if len(steps) < max_points and steps[-1] != n_steps - 1:
-        steps.append(n_steps - 1)
-    return sorted(set(int(np.clip(idx, 0, n_steps - 1)) for idx in steps))
-
-
-def _future_block_rel_l2(
-    pred: np.ndarray,
-    target: np.ndarray,
-    horizon: int,
-) -> float:
-    """Average relative L2 at fixed future horizons (e.g., every 20 steps)."""
-    pred_arr = np.asarray(pred, dtype=np.float32)
-    target_arr = np.asarray(target, dtype=np.float32)
-    n_steps = min(pred_arr.shape[0], target_arr.shape[0])
-    if n_steps <= 1:
-        return float("nan")
-
-    stride = max(1, int(horizon))
-    indices = list(range(stride, n_steps, stride))
-    if not indices:
-        indices = [n_steps - 1]
-
-    rel_errors: List[float] = []
-    for idx in indices:
-        numerator = float(np.linalg.norm(pred_arr[idx] - target_arr[idx]))
-        denominator = float(np.linalg.norm(target_arr[idx]) + 1e-12)
-        rel_errors.append(numerator / denominator)
-    return _safe_mean(rel_errors)
-
-
-def _noisy_reference_field(
-    field: np.ndarray,
-    config: NSConfig,
-    rng_seed: int,
-) -> np.ndarray:
-    prev_state = np.random.get_state()
-    np.random.seed(int(rng_seed))
-    try:
-        noisy = add_hf_noise_2d(
-            np.asarray(field, dtype=np.float32),
-            config.noise_level,
-            config.nx,
-            config.ny,
-            Lx=config.Lx,
-            Ly=config.Ly,
-        )
-    finally:
-        np.random.set_state(prev_state)
-    return np.asarray(noisy, dtype=np.float32)
-
-
-def _noisy_reference_trajectory(
-    trajectory: np.ndarray,
-    config: NSConfig,
-    rng_seed: int,
-) -> np.ndarray:
-    traj = np.asarray(trajectory, dtype=np.float32)
-    noisy_traj = np.empty_like(traj, dtype=np.float32)
-
-    prev_state = np.random.get_state()
-    np.random.seed(int(rng_seed))
-    try:
-        for step in range(traj.shape[0]):
-            noisy_traj[step] = np.asarray(
-                add_hf_noise_2d(
-                    traj[step],
-                    config.noise_level,
-                    config.nx,
-                    config.ny,
-                    Lx=config.Lx,
-                    Ly=config.Ly,
-                ),
-                dtype=np.float32,
-            )
-    finally:
-        np.random.set_state(prev_state)
-
-    return noisy_traj
-
-
-def _build_supervised_pairs(
-    trajectories: List[np.ndarray],
-    config: NSConfig,
-    temporal_enabled: bool,
-    temporal_window: int,
-    temporal_target_mode: str,
-    *,
-    noisy: bool,
-    show_progress: bool,
-    progress_desc: str,
-    return_trajectories: bool = False,
-) -> tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray] | None]:
-    """Build one-step/windowed train pairs from trajectories (optionally noisy)."""
-    inputs: List[np.ndarray] = []
-    targets: List[np.ndarray] = []
-    stored_trajectories: List[np.ndarray] | None = [] if return_trajectories else None
-
-    for trajectory in progress_iter(
-        trajectories,
-        enabled=show_progress,
-        desc=progress_desc,
-        total=len(trajectories),
-    ):
-        traj = np.asarray(trajectory, dtype=np.float32)
-        if noisy:
-            source_traj = np.empty_like(traj, dtype=np.float32)
-            for step in range(len(traj)):
-                source_traj[step] = np.asarray(
-                    add_hf_noise_2d(
-                        traj[step],
-                        config.noise_level,
-                        config.nx,
-                        config.ny,
-                        Lx=config.Lx,
-                        Ly=config.Ly,
-                    ),
-                    dtype=np.float32,
-                )
-        else:
-            source_traj = traj
-
-        if stored_trajectories is not None:
-            stored_trajectories.append(source_traj)
-
-        if temporal_enabled:
-            for start in _window_start_indices(len(source_traj), temporal_window, temporal_target_mode):
-                target_start = _window_target_start(start, temporal_window, temporal_target_mode)
-                inputs.append(np.asarray(source_traj[start : start + temporal_window], dtype=np.float32))
-                targets.append(
-                    np.asarray(source_traj[target_start : target_start + temporal_window], dtype=np.float32)
-                )
-        else:
-            for step in range(len(source_traj) - 1):
-                inputs.append(source_traj[step])
-                targets.append(source_traj[step + 1])
-
-    return inputs, targets, stored_trajectories
 
 
 def run_single_seed(
@@ -373,6 +67,8 @@ def run_single_seed(
     spectral_band_count: int = 8,
     checkpoint_dir: Path | None = None,
     checkpoint_every_epochs: int = 20,
+    resume_clean_state: Dict[str, Any] | None = None,
+    resume_noisy_state: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Train/evaluate clean and noisy models for one seed."""
     np.random.seed(seed * 1000)
@@ -394,17 +90,55 @@ def run_single_seed(
     temporal_target_mode = str(temporal_cfg["target_mode"])
     checkpoint_interval = max(1, int(checkpoint_every_epochs))
     resolved_checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir is not None else None
+    best_val_tracker: Dict[str, float] = {
+        "clean": float("inf"),
+        "noisy": float("inf"),
+    }
+    latest_training_state: Dict[str, Dict[str, Any] | None] = {
+        "clean": None,
+        "noisy": None,
+    }
 
-    def _save_periodic_checkpoint(model: Any, model_tag: str, epoch: int) -> None:
+    def _build_checkpoint_payload(
+        model_tag: str,
+        epoch: int,
+        val_loss: float,
+        training_state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "format": "training_state_v1",
+            "phase": str(model_tag),
+            "epoch": int(epoch),
+            "val_loss": float(val_loss) if np.isfinite(val_loss) else float("nan"),
+            "training_state": training_state,
+        }
+
+    def _save_checkpoint_event(
+        model_tag: str,
+        epoch: int,
+        val_loss: float,
+        training_state: Dict[str, Any],
+    ) -> None:
+        payload = _build_checkpoint_payload(model_tag, epoch, val_loss, training_state)
+        latest_training_state[model_tag] = payload
         if resolved_checkpoint_dir is None:
             return
         epoch_idx = int(epoch)
         if epoch_idx % checkpoint_interval != 0:
-            return
-        save_checkpoint(
-            resolved_checkpoint_dir / f"model_{model_tag}_epoch_{epoch_idx:04d}.npz",
-            model.state_dict(),
-        )
+            pass
+        else:
+            save_checkpoint(
+                resolved_checkpoint_dir / f"model_{model_tag}_epoch_{epoch_idx:04d}.npz",
+                payload,
+            )
+        if np.isfinite(val_loss) and float(val_loss) < best_val_tracker.get(model_tag, float("inf")):
+            best_val_tracker[model_tag] = float(val_loss)
+            best_payload = dict(payload)
+            best_payload["is_best"] = True
+            save_checkpoint(
+                resolved_checkpoint_dir / f"model_{model_tag}_best.npz",
+                best_payload,
+            )
 
     val_fraction = float(np.clip(config.train_validation_fraction, 0.0, 0.95))
     n_train_traj_total = len(train_trajectories)
@@ -500,8 +234,8 @@ def run_single_seed(
         model_depth=config.train_model_depth,
         operator_config=operator_config,
     )
-    def _clean_checkpoint_callback(epoch: int) -> None:
-        _save_periodic_checkpoint(model_clean, "clean", epoch)
+    def _clean_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
+        _save_checkpoint_event("clean", epoch, val_loss, training_state)
 
     model_clean.train(
         inputs,
@@ -521,11 +255,25 @@ def run_single_seed(
         val_inputs=val_inputs,
         val_targets=val_targets_clean,
         checkpoint_callback=_clean_checkpoint_callback,
+        early_stopping_patience=config.train_early_stopping_patience,
+        resume_state=resume_clean_state,
         show_progress=show_training_progress,
         progress_desc="Training clean model",
     )
     if resolved_checkpoint_dir is not None:
-        save_checkpoint(resolved_checkpoint_dir / "model_clean.npz", model_clean.state_dict())
+        clean_payload = latest_training_state.get("clean")
+        if clean_payload is None:
+            clean_payload = {
+                "format": "training_state_v1",
+                "phase": "clean",
+                "epoch": int(config.train_iterations),
+                "val_loss": float("nan"),
+                "training_state": {"model_state": model_clean.state_dict()},
+            }
+        else:
+            clean_payload = dict(clean_payload)
+        clean_payload["is_final"] = True
+        save_checkpoint(resolved_checkpoint_dir / "model_clean.npz", clean_payload)
     if str(device).lower() == "cuda":
         _move_model_device(model_clean, "cpu")
         gc.collect()
@@ -586,8 +334,8 @@ def run_single_seed(
         model_depth=config.train_model_depth,
         operator_config=operator_config,
     )
-    def _noisy_checkpoint_callback(epoch: int) -> None:
-        _save_periodic_checkpoint(model_noisy, "noisy", epoch)
+    def _noisy_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
+        _save_checkpoint_event("noisy", epoch, val_loss, training_state)
 
     model_noisy.train(
         inputs_noisy,
@@ -607,11 +355,25 @@ def run_single_seed(
         val_inputs=val_inputs_noisy,
         val_targets=val_targets_noisy,
         checkpoint_callback=_noisy_checkpoint_callback,
+        early_stopping_patience=config.train_early_stopping_patience,
+        resume_state=resume_noisy_state,
         show_progress=show_training_progress,
         progress_desc="Training noisy model",
     )
     if resolved_checkpoint_dir is not None:
-        save_checkpoint(resolved_checkpoint_dir / "model_noisy.npz", model_noisy.state_dict())
+        noisy_payload = latest_training_state.get("noisy")
+        if noisy_payload is None:
+            noisy_payload = {
+                "format": "training_state_v1",
+                "phase": "noisy",
+                "epoch": int(config.train_iterations),
+                "val_loss": float("nan"),
+                "training_state": {"model_state": model_noisy.state_dict()},
+            }
+        else:
+            noisy_payload = dict(noisy_payload)
+        noisy_payload["is_final"] = True
+        save_checkpoint(resolved_checkpoint_dir / "model_noisy.npz", noisy_payload)
     if str(device).lower() == "cuda":
         _move_model_device(model_clean, "cuda")
         gc.collect()
@@ -621,6 +383,9 @@ def run_single_seed(
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+    _load_best_checkpoint_for_eval(model_clean, resolved_checkpoint_dir, "clean")
+    _load_best_checkpoint_for_eval(model_noisy, resolved_checkpoint_dir, "noisy")
 
     metrics = {
         "clean_l2": [],
@@ -930,6 +695,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Residual projection basis for HFV/LFV (defaults to rsd.basis in YAML, else fourier).",
     )
+    parser.add_argument(
+        "--resume-clean-checkpoint",
+        type=str,
+        default=None,
+        help="Optional checkpoint path for resuming clean-model training state.",
+    )
+    parser.add_argument(
+        "--resume-noisy-checkpoint",
+        type=str,
+        default=None,
+        help="Optional checkpoint path for resuming noisy-model training state.",
+    )
     return parser.parse_args()
 
 
@@ -980,6 +757,16 @@ def main() -> None:
     data_progress = bool(progress.get("data_generation", progress_enabled))
     training_progress = bool(progress.get("training", progress_enabled))
     eval_progress = bool(progress.get("evaluation", progress_enabled))
+    resume_clean_state = None
+    resume_noisy_state = None
+    if args.resume_clean_checkpoint:
+        loaded_clean = load_checkpoint(args.resume_clean_checkpoint)
+        if isinstance(loaded_clean, dict):
+            resume_clean_state = loaded_clean.get("training_state", loaded_clean)
+    if args.resume_noisy_checkpoint:
+        loaded_noisy = load_checkpoint(args.resume_noisy_checkpoint)
+        if isinstance(loaded_noisy, dict):
+            resume_noisy_state = loaded_noisy.get("training_state", loaded_noisy)
 
     results = run_single_seed(
         config,
@@ -1001,6 +788,8 @@ def main() -> None:
         spectral_band_count=requested_spectral_band_count,
         checkpoint_dir=run_ckpt_dir,
         checkpoint_every_epochs=config.train_checkpoint_every_epochs,
+        resume_clean_state=resume_clean_state,
+        resume_noisy_state=resume_noisy_state,
     )
 
     viz_payload = results.pop("_viz")

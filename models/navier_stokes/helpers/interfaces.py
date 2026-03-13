@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Protocol
+from typing import Any, Callable, Dict, List, Protocol
 
 import numpy as np
 
@@ -31,7 +31,9 @@ class OneStepModel(Protocol):
         rollout_weight: float = 0.0,
         val_inputs: List[np.ndarray] | None = None,
         val_targets: List[np.ndarray] | None = None,
-        checkpoint_callback: Callable[[int], None] | None = None,
+        checkpoint_callback: Callable[[int, float, Dict[str, Any]], None] | None = None,
+        early_stopping_patience: int | None = None,
+        resume_state: Dict[str, Any] | None = None,
         show_progress: bool = False,
         progress_desc: str | None = None,
     ) -> None:

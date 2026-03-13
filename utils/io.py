@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import numpy as np
+import torch
 
 
 def ensure_dir(path: str | Path) -> Path:
@@ -62,7 +63,17 @@ def save_json(path: str | Path, data: Dict[str, Any]) -> None:
 
 
 def save_checkpoint(path: str | Path, payload: Dict[str, Any]) -> None:
-    """Save model state payload as NPZ."""
+    """Save checkpoint payload via torch serialization."""
     file_path = Path(path)
     ensure_dir(file_path.parent)
-    np.savez(file_path, **payload)
+    torch.save(payload, file_path)
+
+
+def load_checkpoint(path: str | Path, map_location: str | torch.device | None = "cpu") -> Dict[str, Any]:
+    """Load checkpoint payload saved with torch serialization."""
+    file_path = Path(path)
+    try:
+        return torch.load(file_path, map_location=map_location, weights_only=False)
+    except TypeError:
+        # Backward compatibility with older PyTorch versions that lack weights_only.
+        return torch.load(file_path, map_location=map_location)
