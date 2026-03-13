@@ -67,6 +67,7 @@ training:
   one_cycle_pct_start: 0.3
   one_cycle_div_factor: 25.0
   one_cycle_final_div_factor: 10000.0
+  checkpoint_every_epochs: 20
   n_iter: 100
   batch_size: 32
   grad_clip: 1.0
@@ -95,16 +96,16 @@ training:
       separable: false
       rank: 1.0
     tfno:
-      hidden_channels: 64
-      n_layers: 8
+      hidden_channels: 48
+      n_layers: 6
       factorization: Tucker
       rank: 0.1
       temporal:
         enabled: true
-        input_steps: 32
-        output_steps: 32
+        input_steps: 20
+        output_steps: 20
         target_mode: next_block
-        n_modes_time: 16
+        n_modes_time: 8
     fno:
       hidden_channels: 32
       n_layers: 4

@@ -62,7 +62,9 @@ Each YAML controls all run parameters, including:
 - time integration
 - train/test trajectory counts
 - data source selection (`data.external.source`: `generated`, `neuraloperator`, `pdebench`)
-- training hyperparameters (`noise_level`, `lr`, `n_iter`, `batch_size`, `grad_clip`)
+- training hyperparameters (`noise_level`, `lr`, `n_iter`, `batch_size`, `grad_clip`, `weight_decay`)
+- optional one-cycle learning-rate schedule (`training.use_one_cycle_lr`, `training.one_cycle_pct_start`, `training.one_cycle_div_factor`, `training.one_cycle_final_div_factor`)
+- checkpoint cadence (`training.checkpoint_every_epochs`, default `20`)
 - rollout-stability controls (`training.rollout_horizon`, `training.rollout_weight`)
 - validation monitoring split (`training.validation_fraction`) used only for progress reporting
 - coupled-species balancing controls (`training.u_weight`, `training.v_weight`, `training.channel_balance_cap`)
@@ -74,7 +76,7 @@ Each YAML controls all run parameters, including:
     `enabled`, `input_steps`, `output_steps` (must equal `input_steps`), `target_mode` (`shifted` or `next_block`), `n_modes_time`
 - training objective (`training.loss`: `combined`, `l2`, `l1`, `spectral_decay`, `energy`)
 - progress bars (`progress.enabled`, `progress.data_generation`, `progress.training`, `progress.evaluation`)
-  - when training progress is enabled, tqdm shows `train_loss` and `val_loss` live
+  - when training progress is enabled, tqdm shows `train_loss`, `val_loss`, and optimizer `lr` live
 - RSD projection basis (`rsd.basis`: `fourier`, `laplace`, `wavelet`, `svd`) and band settings (`omega_1_frac`, `omega_2_frac`)
 - multiscale spectral diagnostics band count (`rsd.spectral_band_count`, default `8`)
 - optional RSD no-forcing residual mode for RD (`rsd.assume_no_forcing`: `true|false`)
@@ -170,6 +172,7 @@ Each run writes to deterministic paths:
 - `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/fit_quality/test_noisy.png`
 - `checkpoints/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/model_clean.npz`
 - `checkpoints/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/model_noisy.npz`
+- `checkpoints/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/model_<clean|noisy>_epoch_XXXX.npz` (saved every `training.checkpoint_every_epochs`)
 
 `results.json` now includes, in addition to L2/HFV/LFV:
 - space-time PDE residual metrics (`clean/noisy_pde_residual_st_rms`, plus `u/v` components for RD)

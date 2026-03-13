@@ -294,6 +294,65 @@ def _noisy_reference_trajectory(
     return noisy_traj
 
 
+def _build_supervised_pairs(
+    trajectories: List[np.ndarray],
+    config: NSConfig,
+    temporal_enabled: bool,
+    temporal_window: int,
+    temporal_target_mode: str,
+    *,
+    noisy: bool,
+    show_progress: bool,
+    progress_desc: str,
+    return_trajectories: bool = False,
+) -> tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray] | None]:
+    """Build one-step/windowed train pairs from trajectories (optionally noisy)."""
+    inputs: List[np.ndarray] = []
+    targets: List[np.ndarray] = []
+    stored_trajectories: List[np.ndarray] | None = [] if return_trajectories else None
+
+    for trajectory in progress_iter(
+        trajectories,
+        enabled=show_progress,
+        desc=progress_desc,
+        total=len(trajectories),
+    ):
+        traj = np.asarray(trajectory, dtype=np.float32)
+        if noisy:
+            source_traj = np.empty_like(traj, dtype=np.float32)
+            for step in range(len(traj)):
+                source_traj[step] = np.asarray(
+                    add_hf_noise_2d(
+                        traj[step],
+                        config.noise_level,
+                        config.nx,
+                        config.ny,
+                        Lx=config.Lx,
+                        Ly=config.Ly,
+                    ),
+                    dtype=np.float32,
+                )
+        else:
+            source_traj = traj
+
+        if stored_trajectories is not None:
+            stored_trajectories.append(source_traj)
+
+        if temporal_enabled:
+            for start in _window_start_indices(len(source_traj), temporal_window, temporal_target_mode):
+                target_start = _window_target_start(start, temporal_window, temporal_target_mode)
+                inputs.append(np.asarray(source_traj[start : start + temporal_window], dtype=np.float32))
+                targets.append(
+                    np.asarray(source_traj[target_start : target_start + temporal_window], dtype=np.float32)
+                )
+        else:
+            for step in range(len(source_traj) - 1):
+                inputs.append(source_traj[step])
+                targets.append(source_traj[step + 1])
+
+    return inputs, targets, stored_trajectories
+
+
 def run_single_seed(
     config: NSConfig,
     method: str,
@@ -312,6 +371,8 @@ def run_single_seed(
     show_training_progress: bool = False,
     show_eval_progress: bool = False,
     spectral_band_count: int = 8,
+    checkpoint_dir: Path | None = None,
+    checkpoint_every_epochs: int = 20,
 ) -> Dict[str, Any]:
     """Train/evaluate clean and noisy models for one seed."""
     np.random.seed(seed * 1000)
@@ -331,6 +392,19 @@ def run_single_seed(
     temporal_enabled = bool(temporal_cfg["enabled"])
     temporal_window = int(temporal_cfg["input_steps"])
     temporal_target_mode = str(temporal_cfg["target_mode"])
+    checkpoint_interval = max(1, int(checkpoint_every_epochs))
+    resolved_checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir is not None else None
+
+    def _save_periodic_checkpoint(model: Any, model_tag: str, epoch: int) -> None:
+        if resolved_checkpoint_dir is None:
+            return
+        epoch_idx = int(epoch)
+        if epoch_idx % checkpoint_interval != 0:
+            return
+        save_checkpoint(
+            resolved_checkpoint_dir / f"model_{model_tag}_epoch_{epoch_idx:04d}.npz",
+            model.state_dict(),
+        )
 
     val_fraction = float(np.clip(config.train_validation_fraction, 0.0, 0.95))
     n_train_traj_total = len(train_trajectories)
@@ -382,86 +456,28 @@ def run_single_seed(
     if not valid_trajectory_steps:
         valid_trajectory_steps = [0, n_snapshots - 1]
 
-    inputs = []
-    inputs_noisy = []
-    targets_clean = []
-    targets_noisy = []
-    val_inputs = []
-    val_inputs_noisy = []
-    val_targets_clean = []
-    val_targets_noisy = []
-    fit_trajectories_noisy: List[np.ndarray] = []
-
-    for trajectory in progress_iter(
+    inputs, targets_clean, _ = _build_supervised_pairs(
         fit_trajectories,
-        enabled=show_data_progress,
-        desc="Build train pairs",
-        total=len(fit_trajectories),
-    ):
-        traj = np.asarray(trajectory, dtype=np.float32)
-        traj_noisy = np.empty_like(traj, dtype=np.float32)
-        for step in range(len(traj)):
-            traj_noisy[step] = np.asarray(
-                add_hf_noise_2d(
-                    traj[step],
-                    config.noise_level,
-                    config.nx,
-                    config.ny,
-                    Lx=config.Lx,
-                    Ly=config.Ly,
-                ),
-                dtype=np.float32,
-            )
-        fit_trajectories_noisy.append(traj_noisy)
-
-        if temporal_enabled:
-            for start in _window_start_indices(len(traj), temporal_window, temporal_target_mode):
-                target_start = _window_target_start(start, temporal_window, temporal_target_mode)
-                inputs.append(np.asarray(traj[start : start + temporal_window], dtype=np.float32))
-                inputs_noisy.append(np.asarray(traj_noisy[start : start + temporal_window], dtype=np.float32))
-                targets_clean.append(np.asarray(traj[target_start : target_start + temporal_window], dtype=np.float32))
-                targets_noisy.append(
-                    np.asarray(traj_noisy[target_start : target_start + temporal_window], dtype=np.float32)
-                )
-        else:
-            for step in range(len(trajectory) - 1):
-                inputs.append(traj[step])
-                inputs_noisy.append(traj_noisy[step])
-                targets_clean.append(traj[step + 1])
-                targets_noisy.append(traj_noisy[step + 1])
-
-    for trajectory in val_trajectories:
-        traj = np.asarray(trajectory, dtype=np.float32)
-        traj_noisy = np.empty_like(traj, dtype=np.float32)
-        for step in range(len(traj)):
-            traj_noisy[step] = np.asarray(
-                add_hf_noise_2d(
-                    traj[step],
-                    config.noise_level,
-                    config.nx,
-                    config.ny,
-                    Lx=config.Lx,
-                    Ly=config.Ly,
-                ),
-                dtype=np.float32,
-            )
-        if temporal_enabled:
-            for start in _window_start_indices(len(traj), temporal_window, temporal_target_mode):
-                target_start = _window_target_start(start, temporal_window, temporal_target_mode)
-                val_inputs.append(np.asarray(traj[start : start + temporal_window], dtype=np.float32))
-                val_inputs_noisy.append(np.asarray(traj_noisy[start : start + temporal_window], dtype=np.float32))
-                val_targets_clean.append(
-                    np.asarray(traj[target_start : target_start + temporal_window], dtype=np.float32)
-                )
-                val_targets_noisy.append(
-                    np.asarray(traj_noisy[target_start : target_start + temporal_window], dtype=np.float32)
-                )
-        else:
-            for step in range(len(trajectory) - 1):
-                val_inputs.append(traj[step])
-                val_inputs_noisy.append(traj_noisy[step])
-                val_targets_clean.append(traj[step + 1])
-                val_targets_noisy.append(traj_noisy[step + 1])
+        config,
+        temporal_enabled,
+        temporal_window,
+        temporal_target_mode,
+        noisy=False,
+        show_progress=show_data_progress,
+        progress_desc="Build train pairs",
+        return_trajectories=False,
+    )
+    val_inputs, val_targets_clean, _ = _build_supervised_pairs(
+        val_trajectories,
+        config,
+        temporal_enabled,
+        temporal_window,
+        temporal_target_mode,
+        noisy=False,
+        show_progress=False,
+        progress_desc="Build validation pairs",
+        return_trajectories=False,
+    )
 
     if not inputs:
         raise ValueError(
@@ -469,6 +485,9 @@ def run_single_seed(
             f"temporal_enabled={temporal_enabled}, temporal_window={temporal_window}, "
             f"n_snapshots={n_snapshots}"
         )
+    eval_pair_index = int(np.clip(eval_pair_index, 0, len(inputs) - 1))
+    eval_input_reference = np.asarray(inputs[eval_pair_index], dtype=np.float32)
+    eval_target_clean_reference = np.asarray(targets_clean[eval_pair_index], dtype=np.float32)
 
     model_clean = build_model(
         method,
@@ -481,6 +500,9 @@ def run_single_seed(
         model_depth=config.train_model_depth,
         operator_config=operator_config,
     )
+    def _clean_checkpoint_callback(epoch: int) -> None:
+        _save_periodic_checkpoint(model_clean, "clean", epoch)
+
     model_clean.train(
         inputs,
         targets_clean,
@@ -498,14 +520,60 @@ def run_single_seed(
         rollout_weight=config.train_rollout_weight,
         val_inputs=val_inputs,
         val_targets=val_targets_clean,
+        checkpoint_callback=_clean_checkpoint_callback,
         show_progress=show_training_progress,
         progress_desc="Training clean model",
     )
+    if resolved_checkpoint_dir is not None:
+        save_checkpoint(resolved_checkpoint_dir / "model_clean.npz", model_clean.state_dict())
     if str(device).lower() == "cuda":
         _move_model_device(model_clean, "cpu")
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    del inputs, targets_clean, val_inputs, val_targets_clean
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    inputs_noisy, targets_noisy, fit_trajectories_noisy = _build_supervised_pairs(
+        fit_trajectories,
+        config,
+        temporal_enabled,
+        temporal_window,
+        temporal_target_mode,
+        noisy=True,
+        show_progress=show_data_progress,
+        progress_desc="Build noisy train pairs",
+        return_trajectories=True,
+    )
+    val_inputs_noisy, val_targets_noisy, _ = _build_supervised_pairs(
+        val_trajectories,
+        config,
+        temporal_enabled,
+        temporal_window,
+        temporal_target_mode,
+        noisy=True,
+        show_progress=False,
+        progress_desc="Build noisy validation pairs",
+        return_trajectories=False,
+    )
+    if not inputs_noisy:
+        raise ValueError(
+            "No noisy training pairs were generated. "
+            f"temporal_enabled={temporal_enabled}, temporal_window={temporal_window}, "
+            f"n_snapshots={n_snapshots}"
+        )
+    if eval_pair_index >= len(inputs_noisy):
+        raise ValueError(
+            "Noisy training pair count differs from clean training pair count "
+            f"(clean_eval_index={eval_pair_index}, noisy_pairs={len(inputs_noisy)})."
+        )
+    eval_target_noisy_reference = np.asarray(targets_noisy[eval_pair_index], dtype=np.float32)
+    del fit_trajectories, val_trajectories, train_trajectories
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     model_noisy = build_model(
         method,
@@ -518,6 +586,9 @@ def run_single_seed(
         model_depth=config.train_model_depth,
         operator_config=operator_config,
     )
+    def _noisy_checkpoint_callback(epoch: int) -> None:
+        _save_periodic_checkpoint(model_noisy, "noisy", epoch)
+
     model_noisy.train(
         inputs_noisy,
         targets_noisy,
@@ -535,14 +606,21 @@ def run_single_seed(
         rollout_weight=config.train_rollout_weight,
         val_inputs=val_inputs_noisy,
         val_targets=val_targets_noisy,
+        checkpoint_callback=_noisy_checkpoint_callback,
         show_progress=show_training_progress,
         progress_desc="Training noisy model",
     )
+    if resolved_checkpoint_dir is not None:
+        save_checkpoint(resolved_checkpoint_dir / "model_noisy.npz", model_noisy.state_dict())
     if str(device).lower() == "cuda":
         _move_model_device(model_clean, "cuda")
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    del inputs_noisy, targets_noisy, val_inputs_noisy, val_targets_noisy, fit_trajectories_noisy
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     metrics = {
         "clean_l2": [],
@@ -644,13 +722,12 @@ def run_single_seed(
             band_key = f"noisy_spectral_band_error_{spectral_band_labels[band_idx]}"
             metrics[band_key].append(float(band_value))
 
-    eval_pair_index = int(np.clip(eval_pair_index, 0, len(inputs) - 1))
     test_case_index = int(np.clip(test_case_index, 0, len(test_cases) - 1))
     test_case = test_cases[test_case_index]
     if temporal_enabled:
-        eval_input_window = np.asarray(inputs[eval_pair_index], dtype=np.float32)
-        eval_target_window = np.asarray(targets_clean[eval_pair_index], dtype=np.float32)
-        eval_target_window_noisy = np.asarray(targets_noisy[eval_pair_index], dtype=np.float32)
+        eval_input_window = np.asarray(eval_input_reference, dtype=np.float32)
+        eval_target_window = np.asarray(eval_target_clean_reference, dtype=np.float32)
+        eval_target_window_noisy = np.asarray(eval_target_noisy_reference, dtype=np.float32)
         eval_pred_window_clean = np.asarray(model_clean.predict_window(eval_input_window), dtype=np.float32)
         eval_pred_window_noisy = np.asarray(model_noisy.predict_window(eval_input_window), dtype=np.float32)
         eval_input, eval_target, eval_pred_clean = _extract_panel_frames(
@@ -721,9 +798,9 @@ def run_single_seed(
         max_test_step = test_case["omega_true"].shape[0] - 2
         test_step_index = int(np.clip(test_step_index, 0, max_test_step))
 
-        eval_input = inputs[eval_pair_index]
-        eval_target = targets_clean[eval_pair_index]
-        eval_target_noisy = np.asarray(targets_noisy[eval_pair_index], dtype=np.float32)
+        eval_input = np.asarray(eval_input_reference, dtype=np.float32)
+        eval_target = np.asarray(eval_target_clean_reference, dtype=np.float32)
+        eval_target_noisy = np.asarray(eval_target_noisy_reference, dtype=np.float32)
         eval_pred_clean = model_clean.forward(eval_input)
         eval_pred_noisy = model_noisy.forward(eval_input)
 
@@ -813,8 +890,6 @@ def run_single_seed(
                 "noisy_spectral_band_error_mean": noisy_spectral_band_error_mean,
             },
         },
-        "_checkpoint_clean": model_clean.state_dict(),
-        "_checkpoint_noisy": model_noisy.state_dict(),
         "_resolved_device": str(model_clean.device),
         "_data_source": data_bundle.source,
         "_data_metadata": data_bundle.metadata,
@@ -924,19 +999,16 @@ def main() -> None:
         show_training_progress=training_progress,
         show_eval_progress=eval_progress,
         spectral_band_count=requested_spectral_band_count,
+        checkpoint_dir=run_ckpt_dir,
+        checkpoint_every_epochs=config.train_checkpoint_every_epochs,
     )
 
-    checkpoint_clean = results.pop("_checkpoint_clean")
-    checkpoint_noisy = results.pop("_checkpoint_noisy")
     viz_payload = results.pop("_viz")
     resolved_device = results.pop("_resolved_device")
     data_source = results.pop("_data_source")
     data_metadata = results.pop("_data_metadata")
     dt = float(results.pop("_dt"))
     n_snapshots = int(results.pop("_n_snapshots"))
-
-    save_checkpoint(run_ckpt_dir / "model_clean.npz", checkpoint_clean)
-    save_checkpoint(run_ckpt_dir / "model_noisy.npz", checkpoint_noisy)
 
     summary = {
         "experiment": experiment_name,

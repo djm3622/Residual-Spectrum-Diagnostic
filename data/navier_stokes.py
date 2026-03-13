@@ -60,6 +60,7 @@ class NSConfig:
     train_rollout_horizon: int = 4
     train_rollout_weight: float = 0.5
     train_validation_fraction: float = 0.1
+    train_checkpoint_every_epochs: int = 20
     train_model_width: int = 64
     train_model_depth: int = 5
 
@@ -128,6 +129,7 @@ class NSConfig:
             train_rollout_horizon=int(training.get("rollout_horizon", 4)),
             train_rollout_weight=float(training.get("rollout_weight", 0.5)),
             train_validation_fraction=float(training.get("validation_fraction", 0.1)),
+            train_checkpoint_every_epochs=int(training.get("checkpoint_every_epochs", 20)),
             train_model_width=int(training.get("model_width", 64)),
             train_model_depth=int(training.get("model_depth", 5)),
             omega_1_frac=float(rsd["omega_1_frac"]),

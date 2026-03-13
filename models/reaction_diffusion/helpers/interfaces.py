@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Protocol, Tuple
+from typing import Callable, Dict, List, Protocol, Tuple
 
 import numpy as np
 
@@ -23,6 +23,11 @@ class CoupledOneStepModel(Protocol):
         n_iter: int,
         batch_size: int = 32,
         grad_clip: float = 1.0,
+        weight_decay: float = 0.0,
+        use_one_cycle_lr: bool = False,
+        one_cycle_pct_start: float = 0.3,
+        one_cycle_div_factor: float = 25.0,
+        one_cycle_final_div_factor: float = 10000.0,
         trajectory_u: List[np.ndarray] | None = None,
         trajectory_v: List[np.ndarray] | None = None,
         rollout_horizon: int = 1,
@@ -32,6 +37,7 @@ class CoupledOneStepModel(Protocol):
         val_targets_u: List[np.ndarray] | None = None,
         val_targets_v: List[np.ndarray] | None = None,
         pair_steps: List[int] | None = None,
+        checkpoint_callback: Callable[[int], None] | None = None,
         u_weight: float = 1.0,
         v_weight: float = 1.0,
         channel_balance_cap: float = 3.0,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import torch
@@ -257,6 +257,7 @@ class NeuralOperatorSurrogate2D:
         rollout_weight: float = 0.0,
         val_inputs: List[np.ndarray] | None = None,
         val_targets: List[np.ndarray] | None = None,
+        checkpoint_callback: Callable[[int], None] | None = None,
         show_progress: bool = False,
         progress_desc: str | None = None,
     ) -> None:
@@ -381,7 +382,7 @@ class NeuralOperatorSurrogate2D:
         self.net.train()
         iter_desc = progress_desc or "Training iterations"
         iter_progress = progress_range(total_iter, enabled=show_progress, desc=iter_desc)
-        for _ in iter_progress:
+        for epoch_idx, _ in enumerate(iter_progress, start=1):
             train_loss_sum = 0.0
             train_loss_count = 0
             perm = torch.randperm(n_samples)
@@ -450,6 +451,8 @@ class NeuralOperatorSurrogate2D:
                     "lr": f"{lr_value:.2e}",
                 }
                 iter_progress.set_postfix(postfix, refresh=False)
+            if checkpoint_callback is not None:
+                checkpoint_callback(epoch_idx)
         self.net.eval()
 
     def state_dict(self) -> Dict[str, np.ndarray]:
