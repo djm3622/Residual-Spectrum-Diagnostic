@@ -19,8 +19,8 @@ time:
   n_snapshots: 101
   dt_max: 0.001
 data:
-  n_train_trajectories: 832
-  n_test_trajectories: 92
+  n_train_trajectories: 968
+  n_test_trajectories: 108
   initial_condition: line_wave
   initial_n_modes: 1
   initial_kmax: 1
@@ -52,8 +52,8 @@ data:
       channel_index: 0
       time_stride: 1
       spatial_stride: 1
-      n_train: 832
-      n_test: 92
+      n_train: 968
+      n_test: 108
       shuffle: true
       split_seed_offset: 1207
       dt: 0.019999980926513672
@@ -61,7 +61,7 @@ training:
   device: cuda
   loss: l2
   noise_level: 0.04
-  lr: 0.0003
+  lr: 0.001
   weight_decay: 0.0001
   use_one_cycle_lr: true
   one_cycle_pct_start: 0.3
@@ -89,22 +89,22 @@ training:
       channel_mlp_dropout: 0.25
       fno_skip: linear
       channel_mlp_skip: soft-gating
-      norm: null
+      norm: group_norm
       domain_padding: 0.0
       implementation: factorized
       separable: false
       rank: 1.0
     tfno:
-      hidden_channels: 48
-      n_layers: 6
+      hidden_channels: 64
+      n_layers: 8
       factorization: Tucker
-      rank: 0.4
+      rank: 0.1
       temporal:
         enabled: true
-        input_steps: 20
-        output_steps: 20
+        input_steps: 32
+        output_steps: 32
         target_mode: next_block
-        n_modes_time: 8
+        n_modes_time: 16
     fno:
       hidden_channels: 32
       n_layers: 4

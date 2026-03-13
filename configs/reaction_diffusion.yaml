@@ -81,10 +81,10 @@ training:
       projection_channel_ratio: 2.0
       use_channel_mlp: true
       channel_mlp_expansion: 0.75
-      channel_mlp_dropout: 0.15
+      channel_mlp_dropout: 0.25
       fno_skip: linear
       channel_mlp_skip: soft-gating
-      norm: null
+      norm: group_norm
       domain_padding: 0.0
       implementation: factorized
       separable: false
@@ -93,7 +93,7 @@ training:
       hidden_channels: 32
       n_layers: 6
       factorization: Tucker
-      rank: 0.2
+      rank: 0.1
       temporal:
         enabled: true
         input_steps: 20
