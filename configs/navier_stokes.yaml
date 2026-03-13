@@ -151,6 +151,7 @@ rsd:
   basis: fourier
   omega_1_frac: 0.0625
   omega_2_frac: 0.1666666667
+  spectral_band_count: 8
 paths:
   output_dir: output
   checkpoint_dir: checkpoints

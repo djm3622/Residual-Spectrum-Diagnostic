@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Mapping
 
 # Use writable cache location in sandboxed environments.
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")
@@ -442,5 +442,151 @@ def save_trajectory_field_rows(
     )
 
     fig.subplots_adjust(left=0.1, right=0.79, top=0.93, bottom=0.04, wspace=0.02, hspace=0.08)
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+
+
+def _finite_pairs(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    x_arr = np.asarray(x, dtype=np.float64).reshape(-1)
+    y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
+    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+    return x_arr[mask], y_arr[mask]
+
+
+def save_clean_noisy_metric_bar(
+    clean_value: float,
+    noisy_value: float,
+    metric_label: str,
+    output_path: str | Path,
+    title: str,
+) -> None:
+    """Save a 2-bar clean/noisy chart for one scalar diagnostic."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    labels = ["Clean", "Noisy"]
+    values = [float(clean_value), float(noisy_value)]
+    colors = ["#0072B2", "#D55E00"]
+
+    fig, ax = plt.subplots(figsize=(4.6, 3.4))
+    bars = ax.bar(labels, values, color=colors, width=0.65)
+    ax.set_ylabel(metric_label)
+    ax.set_title(title)
+    ymax = max([v for v in values if np.isfinite(v)] + [1e-12])
+    ax.set_ylim(0.0, ymax * 1.15)
+    for bar, value in zip(bars, values):
+        if np.isfinite(value):
+            ax.text(
+                bar.get_x() + bar.get_width() * 0.5,
+                bar.get_height(),
+                f"{value:.3e}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+    fig.tight_layout()
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+
+
+def save_spectral_band_error_plot(
+    clean_band_error: List[float],
+    noisy_band_error: List[float],
+    band_labels: List[str],
+    output_path: str | Path,
+    title: str,
+    band_centers: List[float] | None = None,
+) -> None:
+    """Save clean/noisy spectral band-error profile."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    clean = np.asarray(clean_band_error, dtype=np.float64)
+    noisy = np.asarray(noisy_band_error, dtype=np.float64)
+    n_bands = min(clean.size, noisy.size, len(band_labels))
+    if n_bands <= 0:
+        return
+
+    clean = clean[:n_bands]
+    noisy = noisy[:n_bands]
+    labels = [str(lbl) for lbl in band_labels[:n_bands]]
+
+    x = np.arange(1, n_bands + 1, dtype=np.float64)
+    xlabel = "Spectral band index"
+    if band_centers is not None:
+        centers = np.asarray(band_centers[:n_bands], dtype=np.float64)
+        if centers.size == n_bands and np.all(np.isfinite(centers)):
+            x = centers
+            xlabel = "Band center wavenumber"
+
+    fig, ax = plt.subplots(figsize=(6.2, 3.8))
+    ax.plot(x, clean, marker="o", color="#0072B2", label="Clean")
+    ax.plot(x, noisy, marker="o", color="#D55E00", label="Noisy")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Abs band-fraction error")
+    ax.set_title(title)
+    if xlabel == "Spectral band index":
+        ax.set_xticks(np.arange(1, n_bands + 1, dtype=np.float64))
+        ax.set_xticklabels(labels, rotation=0)
+    ax.grid(alpha=0.25, linestyle="--", linewidth=0.7)
+    ax.legend(frameon=True)
+    fig.tight_layout()
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+
+
+def save_metric_vs_l2_grid(
+    l2_clean: List[float],
+    l2_noisy: List[float],
+    metric_series: Mapping[str, Mapping[str, List[float]]],
+    output_path: str | Path,
+    title: str,
+) -> None:
+    """Save metric-vs-L2 scatter grid for clean/noisy trajectories."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not metric_series:
+        return
+
+    items = list(metric_series.items())
+    n_rows = len(items)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(11.0, max(3.0, 3.1 * n_rows)), squeeze=False)
+
+    l2_clean_arr = np.asarray(l2_clean, dtype=np.float64)
+    l2_noisy_arr = np.asarray(l2_noisy, dtype=np.float64)
+
+    for row_idx, (metric_name, payload) in enumerate(items):
+        clean_vals = np.asarray(payload.get("clean", []), dtype=np.float64)
+        noisy_vals = np.asarray(payload.get("noisy", []), dtype=np.float64)
+        panels = [
+            (axes[row_idx, 0], l2_clean_arr, clean_vals, "Clean", "#0072B2"),
+            (axes[row_idx, 1], l2_noisy_arr, noisy_vals, "Noisy", "#D55E00"),
+        ]
+        for ax, x_raw, y_raw, label, color in panels:
+            x, y = _finite_pairs(x_raw, y_raw)
+            if x.size > 0:
+                ax.scatter(x, y, s=24, alpha=0.8, color=color, edgecolors="none")
+            if x.size >= 2:
+                x_center = x - np.mean(x)
+                y_center = y - np.mean(y)
+                denom = float(np.sqrt(np.sum(x_center * x_center) * np.sum(y_center * y_center)))
+                corr = float(np.sum(x_center * y_center) / denom) if denom > 1e-12 else float("nan")
+                if np.isfinite(corr):
+                    coeff = np.polyfit(x, y, deg=1)
+                    x_line = np.linspace(float(np.min(x)), float(np.max(x)), 100)
+                    y_line = coeff[0] * x_line + coeff[1]
+                    ax.plot(x_line, y_line, color=color, linewidth=1.2, alpha=0.85)
+                    ax.set_title(f"{metric_name} vs L2 ({label})  r={corr:.2f}", fontsize=9)
+                else:
+                    ax.set_title(f"{metric_name} vs L2 ({label})", fontsize=9)
+            else:
+                ax.set_title(f"{metric_name} vs L2 ({label})", fontsize=9)
+
+            ax.set_xlabel("L2")
+            ax.set_ylabel(metric_name)
+            ax.grid(alpha=0.25, linestyle="--", linewidth=0.6)
+
+    fig.suptitle(title, fontsize=11)
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.98])
     fig.savefig(path, dpi=200)
     plt.close(fig)

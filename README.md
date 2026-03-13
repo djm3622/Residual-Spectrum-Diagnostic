@@ -76,6 +76,7 @@ Each YAML controls all run parameters, including:
 - progress bars (`progress.enabled`, `progress.data_generation`, `progress.training`, `progress.evaluation`)
   - when training progress is enabled, tqdm shows `train_loss` and `val_loss` live
 - RSD projection basis (`rsd.basis`: `fourier`, `laplace`, `wavelet`, `svd`) and band settings (`omega_1_frac`, `omega_2_frac`)
+- multiscale spectral diagnostics band count (`rsd.spectral_band_count`, default `8`)
 - optional RSD no-forcing residual mode for RD (`rsd.assume_no_forcing`: `true|false`)
 - output/checkpoint roots and artifact toggles
 - fit-visualization indices (`eval_pair_index`, `test_case_index`, `test_step_index`)
@@ -158,12 +159,23 @@ When patching config, it updates all NS run-critical fields from processed metad
 Each run writes to deterministic paths:
 - `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/results.json`
 - `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/summary.png` (if enabled)
+- `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/pde_residual_space_time.png` (if enabled)
+- `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/boundary_condition_error.png` (if enabled)
+- `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/spectral_multiband_error.png` (if enabled)
+- `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/spectral_band_error_profile.png` (if enabled)
+- `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/metrics_vs_l2.png` (if enabled)
 - `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/fit_quality/eval_clean.png`
 - `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/fit_quality/eval_noisy.png`
 - `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/fit_quality/test_clean.png`
 - `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/fit_quality/test_noisy.png`
 - `checkpoints/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/model_clean.npz`
 - `checkpoints/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/model_noisy.npz`
+
+`results.json` now includes, in addition to L2/HFV/LFV:
+- space-time PDE residual metrics (`clean/noisy_pde_residual_st_rms`, plus `u/v` components for RD)
+- periodic boundary-condition error (`clean/noisy_boundary_error`)
+- multi-band spectral errors (`clean/noisy_spectral_multiband_error`, low/mid/high splits, and per-band entries)
+- metric-to-L2 correlation block (`metric_vs_l2`) for clean/noisy trajectories
 
 ## Install
 

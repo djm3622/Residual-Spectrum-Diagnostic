@@ -146,6 +146,7 @@ rsd:
   basis: fourier
   omega_1_frac: 0.2
   omega_2_frac: 0.7
+  spectral_band_count: 8
   assume_no_forcing: true
 paths:
   output_dir: output

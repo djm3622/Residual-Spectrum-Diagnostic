@@ -42,6 +42,76 @@ def _safe_mean(values: List[float]) -> float:
     return float(np.mean(finite))
 
 
+def _safe_pearson_corr(x: List[float], y: List[float]) -> float:
+    x_arr = np.asarray(x, dtype=np.float64).reshape(-1)
+    y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
+    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+    if int(np.count_nonzero(mask)) < 2:
+        return float("nan")
+
+    x_valid = x_arr[mask]
+    y_valid = y_arr[mask]
+    x_center = x_valid - np.mean(x_valid)
+    y_center = y_valid - np.mean(y_valid)
+    denom = float(np.sqrt(np.sum(x_center * x_center) * np.sum(y_center * y_center)))
+    if denom <= 1e-12:
+        return float("nan")
+    return float(np.sum(x_center * y_center) / denom)
+
+
+def _rankdata_average(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    if arr.size == 0:
+        return arr
+    order = np.argsort(arr, kind="mergesort")
+    sorted_arr = arr[order]
+    ranks = np.empty(arr.size, dtype=np.float64)
+
+    start = 0
+    while start < arr.size:
+        end = start + 1
+        while end < arr.size and sorted_arr[end] == sorted_arr[start]:
+            end += 1
+        avg_rank = 0.5 * float(start + end - 1)
+        ranks[order[start:end]] = avg_rank
+        start = end
+    return ranks
+
+
+def _safe_spearman_corr(x: List[float], y: List[float]) -> float:
+    x_arr = np.asarray(x, dtype=np.float64).reshape(-1)
+    y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
+    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+    if int(np.count_nonzero(mask)) < 2:
+        return float("nan")
+
+    x_rank = _rankdata_average(x_arr[mask])
+    y_rank = _rankdata_average(y_arr[mask])
+    return _safe_pearson_corr(x_rank.tolist(), y_rank.tolist())
+
+
+def _build_metric_vs_l2(
+    metrics: Mapping[str, List[float]],
+    metric_ids: List[str],
+) -> Dict[str, Dict[str, Dict[str, float]]]:
+    output: Dict[str, Dict[str, Dict[str, float]]] = {"clean": {}, "noisy": {}}
+    for split in ("clean", "noisy"):
+        l2_key = f"{split}_l2"
+        l2_values = list(metrics.get(l2_key, []))
+        for metric_id in metric_ids:
+            metric_key = f"{split}_{metric_id}"
+            metric_values = list(metrics.get(metric_key, []))
+            x_arr = np.asarray(l2_values, dtype=np.float64)
+            y_arr = np.asarray(metric_values, dtype=np.float64)
+            valid_mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+            output[split][metric_id] = {
+                "pearson": _safe_pearson_corr(l2_values, metric_values),
+                "spearman": _safe_spearman_corr(l2_values, metric_values),
+                "n": int(np.count_nonzero(valid_mask)),
+            }
+    return output
+
+
 def _normalize_method_name(method: str) -> str:
     return str(method).strip().lower().replace("-", "_")
 
@@ -238,11 +308,12 @@ def run_single_seed(
     snapshot_dt: float | None = None,
     data_source: str = "generated",
     data_metadata: Mapping[str, Any] | None = None,
-) -> Dict[str, float]:
+    spectral_band_count: int = 8,
+) -> Dict[str, Any]:
     """Train/evaluate clean and noisy models for one seed."""
     np.random.seed(seed * 1000)
 
-    rsd = ReactionDiffusionRSDAnalyzer(config, basis=basis)
+    rsd = ReactionDiffusionRSDAnalyzer(config, basis=basis, spectral_band_count=spectral_band_count)
 
     if preloaded_train_data is not None and preloaded_test_cases is not None:
         train_data = [
@@ -575,7 +646,27 @@ def run_single_seed(
         "noisy_hfv": [],
         "clean_lfv": [],
         "noisy_lfv": [],
+        "clean_pde_residual_st_rms": [],
+        "noisy_pde_residual_st_rms": [],
+        "clean_pde_residual_st_rms_u": [],
+        "noisy_pde_residual_st_rms_u": [],
+        "clean_pde_residual_st_rms_v": [],
+        "noisy_pde_residual_st_rms_v": [],
+        "clean_boundary_error": [],
+        "noisy_boundary_error": [],
+        "clean_spectral_multiband_error": [],
+        "noisy_spectral_multiband_error": [],
+        "clean_spectral_low_error": [],
+        "noisy_spectral_low_error": [],
+        "clean_spectral_mid_error": [],
+        "noisy_spectral_mid_error": [],
+        "clean_spectral_high_error": [],
+        "noisy_spectral_high_error": [],
     }
+    spectral_band_labels = list(rsd.spectral_band_labels)
+    for band_label in spectral_band_labels:
+        metrics[f"clean_spectral_band_error_{band_label}"] = []
+        metrics[f"noisy_spectral_band_error_{band_label}"] = []
 
     rollout_context: int | None = temporal_window if temporal_enabled else None
 
@@ -646,6 +737,29 @@ def run_single_seed(
         metrics["noisy_hfv"].append(noisy_stats["hfv"])
         metrics["clean_lfv"].append(clean_stats["lfv"])
         metrics["noisy_lfv"].append(noisy_stats["lfv"])
+        metrics["clean_pde_residual_st_rms"].append(clean_stats["pde_residual_st_rms"])
+        metrics["noisy_pde_residual_st_rms"].append(noisy_stats["pde_residual_st_rms"])
+        metrics["clean_pde_residual_st_rms_u"].append(clean_stats["pde_residual_st_rms_u"])
+        metrics["noisy_pde_residual_st_rms_u"].append(noisy_stats["pde_residual_st_rms_u"])
+        metrics["clean_pde_residual_st_rms_v"].append(clean_stats["pde_residual_st_rms_v"])
+        metrics["noisy_pde_residual_st_rms_v"].append(noisy_stats["pde_residual_st_rms_v"])
+        metrics["clean_boundary_error"].append(clean_stats["boundary_error"])
+        metrics["noisy_boundary_error"].append(noisy_stats["boundary_error"])
+        metrics["clean_spectral_multiband_error"].append(clean_stats["spectral_multiband_error"])
+        metrics["noisy_spectral_multiband_error"].append(noisy_stats["spectral_multiband_error"])
+        metrics["clean_spectral_low_error"].append(clean_stats["spectral_low_error"])
+        metrics["noisy_spectral_low_error"].append(noisy_stats["spectral_low_error"])
+        metrics["clean_spectral_mid_error"].append(clean_stats["spectral_mid_error"])
+        metrics["noisy_spectral_mid_error"].append(noisy_stats["spectral_mid_error"])
+        metrics["clean_spectral_high_error"].append(clean_stats["spectral_high_error"])
+        metrics["noisy_spectral_high_error"].append(noisy_stats["spectral_high_error"])
+
+        for band_idx, band_value in enumerate(clean_stats["spectral_band_error"]):
+            band_key = f"clean_spectral_band_error_{spectral_band_labels[band_idx]}"
+            metrics[band_key].append(float(band_value))
+        for band_idx, band_value in enumerate(noisy_stats["spectral_band_error"]):
+            band_key = f"noisy_spectral_band_error_{spectral_band_labels[band_idx]}"
+            metrics[band_key].append(float(band_value))
 
     eval_pair_index = int(np.clip(eval_pair_index, 0, len(inputs_u) - 1))
     test_case_index = int(np.clip(test_case_index, 0, len(test_cases) - 1))
@@ -803,8 +917,35 @@ def run_single_seed(
         test_pred_u_noisy, test_pred_v_noisy = model_noisy.forward(test_input_u, test_input_v)
 
     mean_metrics = {key: _safe_mean(value) for key, value in metrics.items()}
+    compare_metric_ids = [
+        "hfv",
+        "lfv",
+        "pde_residual_st_rms",
+        "boundary_error",
+        "spectral_multiband_error",
+        "spectral_low_error",
+        "spectral_mid_error",
+        "spectral_high_error",
+    ]
+    metric_vs_l2 = _build_metric_vs_l2(metrics, compare_metric_ids)
+    clean_spectral_band_error_mean = [
+        _safe_mean(metrics[f"clean_spectral_band_error_{label}"])
+        for label in spectral_band_labels
+    ]
+    noisy_spectral_band_error_mean = [
+        _safe_mean(metrics[f"noisy_spectral_band_error_{label}"])
+        for label in spectral_band_labels
+    ]
     return {
         **mean_metrics,
+        "metric_vs_l2": metric_vs_l2,
+        "spectral_bands": {
+            "count": int(len(spectral_band_labels)),
+            "labels": spectral_band_labels,
+            "centers": [float(v) for v in rsd.spectral_band_centers],
+            "clean_band_error_mean": clean_spectral_band_error_mean,
+            "noisy_band_error_mean": noisy_spectral_band_error_mean,
+        },
         "_viz": {
             "eval": {
                 "input_u": eval_input_u,
@@ -839,6 +980,26 @@ def run_single_seed(
                 "case_indices": valid_trajectory_case_indices,
                 "step_indices": valid_trajectory_steps,
                 "rows": trajectory_rows,
+            },
+            "diagnostics": {
+                "series": {
+                    "clean_l2": list(metrics["clean_l2"]),
+                    "noisy_l2": list(metrics["noisy_l2"]),
+                    "clean_hfv": list(metrics["clean_hfv"]),
+                    "noisy_hfv": list(metrics["noisy_hfv"]),
+                    "clean_lfv": list(metrics["clean_lfv"]),
+                    "noisy_lfv": list(metrics["noisy_lfv"]),
+                    "clean_pde_residual_st_rms": list(metrics["clean_pde_residual_st_rms"]),
+                    "noisy_pde_residual_st_rms": list(metrics["noisy_pde_residual_st_rms"]),
+                    "clean_boundary_error": list(metrics["clean_boundary_error"]),
+                    "noisy_boundary_error": list(metrics["noisy_boundary_error"]),
+                    "clean_spectral_multiband_error": list(metrics["clean_spectral_multiband_error"]),
+                    "noisy_spectral_multiband_error": list(metrics["noisy_spectral_multiband_error"]),
+                },
+                "spectral_band_labels": spectral_band_labels,
+                "spectral_band_centers": [float(v) for v in rsd.spectral_band_centers],
+                "clean_spectral_band_error_mean": clean_spectral_band_error_mean,
+                "noisy_spectral_band_error_mean": noisy_spectral_band_error_mean,
             },
         },
         "_checkpoint_clean": model_clean.state_dict(),
@@ -908,6 +1069,7 @@ def main() -> None:
     requested_device = args.device if args.device is not None else str(training.get("device", "auto"))
     requested_loss = normalize_loss_name(args.loss if args.loss is not None else str(training.get("loss", "combined")))
     requested_basis = normalize_basis_name(args.basis if args.basis is not None else str(rsd_cfg.get("basis", "fourier")))
+    requested_spectral_band_count = max(3, int(rsd_cfg.get("spectral_band_count", 8)))
 
     run_out_dir, run_ckpt_dir = build_run_dirs(
         output_root,
@@ -975,6 +1137,7 @@ def main() -> None:
         snapshot_dt=snapshot_dt,
         data_source=source_name,
         data_metadata=data_metadata,
+        spectral_band_count=requested_spectral_band_count,
     )
 
     checkpoint_clean = results.pop("_checkpoint_clean")
@@ -995,6 +1158,7 @@ def main() -> None:
         "device_resolved": resolved_device,
         "loss": requested_loss,
         "basis": requested_basis,
+        "spectral_band_count": requested_spectral_band_count,
         "metrics": results,
         "viz_indices": viz_payload["indices"],
         "data": data_info,
@@ -1002,7 +1166,12 @@ def main() -> None:
     save_json(run_out_dir / "results.json", summary)
 
     if artifacts.get("save_figures", True):
-        from utils.plotting import save_clean_noisy_summary_plot
+        from utils.plotting import (
+            save_clean_noisy_metric_bar,
+            save_clean_noisy_summary_plot,
+            save_metric_vs_l2_grid,
+            save_spectral_band_error_plot,
+        )
 
         save_clean_noisy_summary_plot(
             results,
@@ -1011,6 +1180,68 @@ def main() -> None:
                 f"| basis={requested_basis} | seed={args.seed}"
             ),
             output_path=run_out_dir / "summary.png",
+        )
+
+        save_clean_noisy_metric_bar(
+            results["clean_pde_residual_st_rms"],
+            results["noisy_pde_residual_st_rms"],
+            metric_label="Space-time PDE residual RMS",
+            output_path=run_out_dir / "pde_residual_space_time.png",
+            title="PDE residual norm (space-time)",
+        )
+        save_clean_noisy_metric_bar(
+            results["clean_boundary_error"],
+            results["noisy_boundary_error"],
+            metric_label="Boundary-condition error (periodic)",
+            output_path=run_out_dir / "boundary_condition_error.png",
+            title="Boundary-condition error",
+        )
+        save_clean_noisy_metric_bar(
+            results["clean_spectral_multiband_error"],
+            results["noisy_spectral_multiband_error"],
+            metric_label="Multi-band spectral error",
+            output_path=run_out_dir / "spectral_multiband_error.png",
+            title="Multi-band spectral error",
+        )
+
+        diagnostics_viz = viz_payload.get("diagnostics", {})
+        save_spectral_band_error_plot(
+            clean_band_error=diagnostics_viz.get("clean_spectral_band_error_mean", []),
+            noisy_band_error=diagnostics_viz.get("noisy_spectral_band_error_mean", []),
+            band_labels=diagnostics_viz.get("spectral_band_labels", []),
+            band_centers=diagnostics_viz.get("spectral_band_centers", []),
+            output_path=run_out_dir / "spectral_band_error_profile.png",
+            title="Per-band spectral error profile",
+        )
+
+        diagnostic_series = diagnostics_viz.get("series", {})
+        save_metric_vs_l2_grid(
+            l2_clean=diagnostic_series.get("clean_l2", []),
+            l2_noisy=diagnostic_series.get("noisy_l2", []),
+            metric_series={
+                "HFV": {
+                    "clean": diagnostic_series.get("clean_hfv", []),
+                    "noisy": diagnostic_series.get("noisy_hfv", []),
+                },
+                "LFV": {
+                    "clean": diagnostic_series.get("clean_lfv", []),
+                    "noisy": diagnostic_series.get("noisy_lfv", []),
+                },
+                "PDE Residual RMS": {
+                    "clean": diagnostic_series.get("clean_pde_residual_st_rms", []),
+                    "noisy": diagnostic_series.get("noisy_pde_residual_st_rms", []),
+                },
+                "Boundary Error": {
+                    "clean": diagnostic_series.get("clean_boundary_error", []),
+                    "noisy": diagnostic_series.get("noisy_boundary_error", []),
+                },
+                "Spectral Multi-band Error": {
+                    "clean": diagnostic_series.get("clean_spectral_multiband_error", []),
+                    "noisy": diagnostic_series.get("noisy_spectral_multiband_error", []),
+                },
+            },
+            output_path=run_out_dir / "metrics_vs_l2.png",
+            title="Metric effectiveness vs L2",
         )
 
     if artifacts.get("save_fit_visualizations", True):

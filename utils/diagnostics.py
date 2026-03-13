@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 from scipy.fft import dctn, fft2, fftfreq, ifft2
@@ -44,6 +44,109 @@ def _as_batch(fields: np.ndarray) -> np.ndarray:
     if arr.ndim == 3:
         return arr
     raise ValueError(f"Expected residual field to be 2D or 3D, got shape {arr.shape}")
+
+
+def _rms(values: np.ndarray) -> float:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size == 0:
+        return float("nan")
+    return float(np.sqrt(np.mean(arr * arr)))
+
+
+def _periodic_boundary_error_ratio(*fields: np.ndarray) -> float:
+    """Relative periodic boundary mismatch over space-time.
+
+    For each field, we measure opposite-edge mismatch:
+      left-right and top-bottom.
+    We report RMS(mismatch) normalized by RMS(field magnitude).
+    """
+    mismatch_terms: List[float] = []
+    scale_terms: List[float] = []
+
+    for field in fields:
+        samples = _as_batch(field)
+        lr = samples[:, 0, :] - samples[:, -1, :]
+        tb = samples[:, :, 0] - samples[:, :, -1]
+        mismatch_terms.append(float(np.mean(lr * lr)))
+        mismatch_terms.append(float(np.mean(tb * tb)))
+        scale_terms.append(float(np.mean(samples * samples)))
+
+    if not mismatch_terms:
+        return float("nan")
+
+    mismatch_rms = float(np.sqrt(np.mean(mismatch_terms)))
+    scale_rms = float(np.sqrt(np.mean(scale_terms)))
+    return _safe_ratio(mismatch_rms, scale_rms)
+
+
+def _split_three_groups(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    indices = np.arange(values.size)
+    groups = np.array_split(indices, 3)
+
+    def _pick(group_idx: int) -> np.ndarray:
+        group = groups[group_idx]
+        if group.size == 0:
+            return np.array([np.nan], dtype=np.float64)
+        return values[group]
+
+    return _pick(0), _pick(1), _pick(2)
+
+
+class _FourierMultiBandAnalyzer2D:
+    """Fourier-band decomposition for trajectory-level spectral diagnostics."""
+
+    def __init__(self, fourier_k_mag: np.ndarray, n_bands: int = 8):
+        self.n_bands = max(3, int(n_bands))
+        self._k_mag = np.asarray(fourier_k_mag, dtype=np.float64)
+        nonzero_flat_idx = np.flatnonzero((self._k_mag > 0.0).reshape(-1))
+        nonzero_k = self._k_mag.reshape(-1)[nonzero_flat_idx]
+
+        self.band_labels: List[str] = [f"b{idx + 1:02d}" for idx in range(self.n_bands)]
+        self.band_centers: List[float] = []
+        self._band_masks: List[np.ndarray] = []
+
+        if nonzero_k.size == 0:
+            for _ in range(self.n_bands):
+                self.band_centers.append(float("nan"))
+                self._band_masks.append(np.zeros_like(self._k_mag, dtype=bool))
+            return
+
+        sorted_pos = np.argsort(nonzero_k, kind="mergesort")
+        sorted_band_id = np.empty(nonzero_k.size, dtype=np.int32)
+        cut_points = np.linspace(0, nonzero_k.size, self.n_bands + 1, dtype=np.int64)
+        for band_idx in range(self.n_bands):
+            lo = int(cut_points[band_idx])
+            hi = int(cut_points[band_idx + 1])
+            sorted_band_id[lo:hi] = band_idx
+
+        band_id = np.empty(nonzero_k.size, dtype=np.int32)
+        band_id[sorted_pos] = sorted_band_id
+
+        flat_size = self._k_mag.size
+        for band_idx in range(self.n_bands):
+            in_band = band_id == band_idx
+            band_flat_mask = np.zeros(flat_size, dtype=bool)
+            band_flat_mask[nonzero_flat_idx[in_band]] = True
+            band_mask = band_flat_mask.reshape(self._k_mag.shape)
+            self._band_masks.append(band_mask)
+            if np.any(in_band):
+                self.band_centers.append(float(np.mean(nonzero_k[in_band])))
+            else:
+                self.band_centers.append(float("nan"))
+
+    def power_map(self, fields: np.ndarray) -> np.ndarray:
+        samples = _as_batch(fields)
+        return np.mean(np.abs(fft2(samples, axes=(-2, -1))) ** 2, axis=0)
+
+    def band_energies_from_power(self, power: np.ndarray) -> np.ndarray:
+        return np.asarray([float(np.sum(power[mask])) for mask in self._band_masks], dtype=np.float64)
+
+    def band_fractions_from_power(self, power: np.ndarray) -> np.ndarray:
+        energies = self.band_energies_from_power(power)
+        total = float(np.sum(energies))
+        if total <= 0.0:
+            return np.zeros_like(energies)
+        return energies / total
 
 
 def _max_haar_levels(nx: int, ny: int) -> int:
@@ -246,7 +349,7 @@ class _BasisProjector2D:
 class NavierStokesRSDAnalyzer:
     """RSD metrics for 2D incompressible Navier-Stokes trajectories."""
 
-    def __init__(self, config: NSConfig, basis: str = "fourier"):
+    def __init__(self, config: NSConfig, basis: str = "fourier", spectral_band_count: int = 8):
         self.config = config
         self.nx = config.nx
         self.ny = config.ny
@@ -273,8 +376,20 @@ class NavierStokesRSDAnalyzer:
             fourier_k_mag=self.K_mag,
             fourier_k_max=k_nyq,
         )
+        self.spectral_bands = _FourierMultiBandAnalyzer2D(
+            fourier_k_mag=self.K_mag,
+            n_bands=max(3, int(spectral_band_count)),
+        )
 
         self.ns_solver = NavierStokes2D(config)
+
+    @property
+    def spectral_band_labels(self) -> List[str]:
+        return list(self.spectral_bands.band_labels)
+
+    @property
+    def spectral_band_centers(self) -> List[float]:
+        return [float(value) for value in self.spectral_bands.band_centers]
 
     def compute_residual(self, omega_traj: np.ndarray, dt: float) -> np.ndarray:
         """Residual: r = ∂ω/∂t + (u·∇)ω - ν∇²ω - f."""
@@ -302,26 +417,46 @@ class NavierStokesRSDAnalyzer:
         """Low-frequency violation ratio in residual spectral power."""
         return self.projector.compute_lfv(residuals)
 
-    def compute_metrics(self, omega_pred: np.ndarray, omega_true: np.ndarray, dt: float) -> Dict[str, float]:
-        """Return L2, HFV, LFV, and average residual magnitude."""
+    def compute_metrics(self, omega_pred: np.ndarray, omega_true: np.ndarray, dt: float) -> Dict[str, Any]:
+        """Return L2 plus multiscale residual/spectral diagnostics."""
         l2_error = float(np.linalg.norm(omega_pred - omega_true) / np.linalg.norm(omega_true))
         residuals = self.compute_residual(omega_pred, dt)
         hfv = self.compute_hfv(residuals)
         lfv = self.compute_lfv(residuals)
         residual_mag = float(np.mean(np.abs(residuals)))
+        pde_residual_st_rms = _rms(residuals)
+        boundary_error = _periodic_boundary_error_ratio(omega_pred)
+
+        pred_power = self.spectral_bands.power_map(omega_pred)
+        true_power = self.spectral_bands.power_map(omega_true)
+        pred_frac = self.spectral_bands.band_fractions_from_power(pred_power)
+        true_frac = self.spectral_bands.band_fractions_from_power(true_power)
+        spectral_band_error = np.abs(pred_frac - true_frac)
+        low_group, mid_group, high_group = _split_three_groups(spectral_band_error)
+        spectral_low_error = float(np.nanmean(low_group))
+        spectral_mid_error = float(np.nanmean(mid_group))
+        spectral_high_error = float(np.nanmean(high_group))
+        spectral_multiband_error = float(np.mean(spectral_band_error))
 
         return {
             "l2_error": l2_error,
             "hfv": hfv,
             "lfv": lfv,
             "residual_mag": residual_mag,
+            "pde_residual_st_rms": pde_residual_st_rms,
+            "boundary_error": boundary_error,
+            "spectral_multiband_error": spectral_multiband_error,
+            "spectral_low_error": spectral_low_error,
+            "spectral_mid_error": spectral_mid_error,
+            "spectral_high_error": spectral_high_error,
+            "spectral_band_error": spectral_band_error.astype(float).tolist(),
         }
 
 
 class ReactionDiffusionRSDAnalyzer:
     """RSD metrics for coupled Gray-Scott trajectories."""
 
-    def __init__(self, config: GrayScottConfig, basis: str = "fourier"):
+    def __init__(self, config: GrayScottConfig, basis: str = "fourier", spectral_band_count: int = 8):
         self.config = config
         self.nx = config.nx
         self.ny = config.ny
@@ -352,6 +487,18 @@ class ReactionDiffusionRSDAnalyzer:
             fourier_k_mag=self.K_mag,
             fourier_k_max=k_nyq,
         )
+        self.spectral_bands = _FourierMultiBandAnalyzer2D(
+            fourier_k_mag=self.K_mag,
+            n_bands=max(3, int(spectral_band_count)),
+        )
+
+    @property
+    def spectral_band_labels(self) -> List[str]:
+        return list(self.spectral_bands.band_labels)
+
+    @property
+    def spectral_band_centers(self) -> List[float]:
+        return [float(value) for value in self.spectral_bands.band_centers]
 
     def compute_residual(self, u_traj: np.ndarray, v_traj: np.ndarray, dt: float) -> Tuple[np.ndarray, np.ndarray]:
         """Residuals for coupled Gray-Scott PDE."""
@@ -402,8 +549,8 @@ class ReactionDiffusionRSDAnalyzer:
         u_true: np.ndarray,
         v_true: np.ndarray,
         dt: float,
-    ) -> Dict[str, float]:
-        """Return coupled L2 and RSD metrics."""
+    ) -> Dict[str, Any]:
+        """Return coupled L2 plus multiscale residual/spectral diagnostics."""
         l2_u = np.linalg.norm(u_pred - u_true) / np.linalg.norm(u_true)
         l2_v = np.linalg.norm(v_pred - v_true) / np.linalg.norm(v_true)
         l2 = float(np.sqrt(l2_u**2 + l2_v**2))
@@ -411,6 +558,23 @@ class ReactionDiffusionRSDAnalyzer:
         r_u, r_v = self.compute_residual(u_pred, v_pred, dt)
         hfv = self.compute_hfv(r_u, r_v)
         lfv = self.compute_lfv(r_u, r_v)
+        pde_residual_st_rms_u = _rms(r_u)
+        pde_residual_st_rms_v = _rms(r_v)
+        pde_residual_st_rms = float(
+            np.sqrt(0.5 * (pde_residual_st_rms_u * pde_residual_st_rms_u + pde_residual_st_rms_v * pde_residual_st_rms_v))
+        )
+        boundary_error = _periodic_boundary_error_ratio(u_pred, v_pred)
+
+        pred_power = self.spectral_bands.power_map(u_pred) + self.spectral_bands.power_map(v_pred)
+        true_power = self.spectral_bands.power_map(u_true) + self.spectral_bands.power_map(v_true)
+        pred_frac = self.spectral_bands.band_fractions_from_power(pred_power)
+        true_frac = self.spectral_bands.band_fractions_from_power(true_power)
+        spectral_band_error = np.abs(pred_frac - true_frac)
+        low_group, mid_group, high_group = _split_three_groups(spectral_band_error)
+        spectral_low_error = float(np.nanmean(low_group))
+        spectral_mid_error = float(np.nanmean(mid_group))
+        spectral_high_error = float(np.nanmean(high_group))
+        spectral_multiband_error = float(np.mean(spectral_band_error))
 
         return {
             "l2_error": l2,
@@ -418,4 +582,13 @@ class ReactionDiffusionRSDAnalyzer:
             "l2_v": float(l2_v),
             "hfv": hfv,
             "lfv": lfv,
+            "pde_residual_st_rms": pde_residual_st_rms,
+            "pde_residual_st_rms_u": pde_residual_st_rms_u,
+            "pde_residual_st_rms_v": pde_residual_st_rms_v,
+            "boundary_error": boundary_error,
+            "spectral_multiband_error": spectral_multiband_error,
+            "spectral_low_error": spectral_low_error,
+            "spectral_mid_error": spectral_mid_error,
+            "spectral_high_error": spectral_high_error,
+            "spectral_band_error": spectral_band_error.astype(float).tolist(),
         }
