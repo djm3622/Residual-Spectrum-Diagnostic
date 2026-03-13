@@ -52,6 +52,11 @@ class NSConfig:
     train_iterations: int = 100
     train_batch_size: int = 32
     train_grad_clip: float = 1.0
+    train_weight_decay: float = 0.0
+    train_use_one_cycle_lr: bool = False
+    train_one_cycle_pct_start: float = 0.3
+    train_one_cycle_div_factor: float = 25.0
+    train_one_cycle_final_div_factor: float = 10000.0
     train_rollout_horizon: int = 4
     train_rollout_weight: float = 0.5
     train_validation_fraction: float = 0.1
@@ -115,6 +120,11 @@ class NSConfig:
             train_iterations=int(training["n_iter"]),
             train_batch_size=int(training.get("batch_size", 32)),
             train_grad_clip=float(training.get("grad_clip", 1.0)),
+            train_weight_decay=float(training.get("weight_decay", 0.0)),
+            train_use_one_cycle_lr=bool(training.get("use_one_cycle_lr", False)),
+            train_one_cycle_pct_start=float(training.get("one_cycle_pct_start", 0.3)),
+            train_one_cycle_div_factor=float(training.get("one_cycle_div_factor", 25.0)),
+            train_one_cycle_final_div_factor=float(training.get("one_cycle_final_div_factor", 10000.0)),
             train_rollout_horizon=int(training.get("rollout_horizon", 4)),
             train_rollout_weight=float(training.get("rollout_weight", 0.5)),
             train_validation_fraction=float(training.get("validation_fraction", 0.1)),

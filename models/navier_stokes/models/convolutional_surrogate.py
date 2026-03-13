@@ -66,6 +66,11 @@ class ConvolutionalSurrogate2D:
         n_iter: int = 100,
         batch_size: int = 32,
         grad_clip: float = 1.0,
+        weight_decay: float = 0.0,
+        use_one_cycle_lr: bool = False,
+        one_cycle_pct_start: float = 0.3,
+        one_cycle_div_factor: float = 25.0,
+        one_cycle_final_div_factor: float = 10000.0,
         trajectory: List[np.ndarray] | None = None,
         rollout_horizon: int = 1,
         rollout_weight: float = 0.0,
@@ -95,6 +100,11 @@ class ConvolutionalSurrogate2D:
         n_samples = x_train.shape[0]
         batch = max(1, min(int(batch_size), n_samples))
         clip = max(float(grad_clip), 1e-8)
+        wd = max(0.0, float(weight_decay))
+        one_cycle_enabled = bool(use_one_cycle_lr)
+        pct_start = float(np.clip(one_cycle_pct_start, 1e-4, 0.9999))
+        div_factor = max(float(one_cycle_div_factor), 1.0)
+        final_div_factor = max(float(one_cycle_final_div_factor), 1.0)
         horizon = max(1, int(rollout_horizon))
         rollout_w = max(0.0, float(rollout_weight))
 
@@ -112,7 +122,27 @@ class ConvolutionalSurrogate2D:
             rollout_batch = 0
             max_start = -1
 
-        optimizer = build_adam_optimizer(self.net.parameters(), lr=float(lr), device=self.device)
+        optimizer = build_adam_optimizer(
+            self.net.parameters(),
+            lr=float(lr),
+            device=self.device,
+            weight_decay=wd,
+        )
+        total_iter = max(1, int(n_iter))
+        steps_per_epoch = max(1, int(np.ceil(n_samples / batch)))
+        total_steps = max(1, total_iter * steps_per_epoch)
+        scheduler = None
+        if one_cycle_enabled:
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=float(lr),
+                total_steps=total_steps,
+                pct_start=pct_start,
+                anneal_strategy="cos",
+                cycle_momentum=False,
+                div_factor=div_factor,
+                final_div_factor=final_div_factor,
+            )
 
         def _compute_validation_loss() -> float:
             if not has_val or x_val is None or y_val is None:
@@ -141,7 +171,6 @@ class ConvolutionalSurrogate2D:
             return total / float(count)
 
         self.net.train()
-        total_iter = max(1, int(n_iter))
         iter_desc = progress_desc or "Training iterations"
         iter_progress = progress_range(total_iter, enabled=show_progress, desc=iter_desc)
         for _ in iter_progress:
@@ -189,15 +218,19 @@ class ConvolutionalSurrogate2D:
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=clip)
                     optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
 
             if show_progress and hasattr(iter_progress, "set_postfix"):
                 train_loss_value = (
                     train_loss_sum / float(train_loss_count) if train_loss_count > 0 else float("nan")
                 )
                 val_loss_value = _compute_validation_loss()
+                lr_value = float(optimizer.param_groups[0]["lr"])
                 postfix = {
                     "train_loss": f"{train_loss_value:.3e}" if np.isfinite(train_loss_value) else "nan",
                     "val_loss": f"{val_loss_value:.3e}" if np.isfinite(val_loss_value) else "n/a",
+                    "lr": f"{lr_value:.2e}",
                 }
                 iter_progress.set_postfix(postfix, refresh=False)
         self.net.eval()

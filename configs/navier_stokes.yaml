@@ -62,6 +62,11 @@ training:
   loss: l2
   noise_level: 0.04
   lr: 0.0003
+  weight_decay: 0.0001
+  use_one_cycle_lr: true
+  one_cycle_pct_start: 0.3
+  one_cycle_div_factor: 25.0
+  one_cycle_final_div_factor: 10000.0
   n_iter: 100
   batch_size: 32
   grad_clip: 1.0

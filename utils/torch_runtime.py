@@ -69,18 +69,20 @@ def build_adam_optimizer(
     parameters: Iterable[torch.nn.Parameter],
     lr: float,
     device: torch.device,
+    weight_decay: float = 0.0,
 ) -> torch.optim.Optimizer:
     """Build Adam optimizer with optional CUDA fused kernels."""
     params = list(parameters)
     has_complex_params = any(param.is_complex() for param in params)
+    wd = max(0.0, float(weight_decay))
 
     if device.type == "cuda":
         try:
             if not has_complex_params:
-                return torch.optim.Adam(params, lr=lr, fused=True)
+                return torch.optim.Adam(params, lr=lr, weight_decay=wd, fused=True)
         except (TypeError, RuntimeError):
             pass
-    return torch.optim.Adam(params, lr=lr)
+    return torch.optim.Adam(params, lr=lr, weight_decay=wd)
 
 
 def build_grad_scaler(device: torch.device) -> torch.cuda.amp.GradScaler | None:
