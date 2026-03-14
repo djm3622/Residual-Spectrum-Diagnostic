@@ -27,6 +27,7 @@ from data.reaction_diffusion.external import (
     pdebench_source_config_from_yaml,
 )
 from evaluatin.metrics import build_metric_vs_l2 as _build_metric_vs_l2
+from evaluatin.metrics import build_paired_bootstrap_gap as _build_paired_bootstrap_gap
 from evaluatin.metrics import safe_mean as _safe_mean
 from evaluatin.reaction_diffusion import extract_panel_frames as _extract_panel_frames
 from evaluatin.reaction_diffusion import extract_target_frame as _extract_target_frame
@@ -528,11 +529,31 @@ def run_single_seed(
         "noisy_spectral_mid_error": [],
         "clean_spectral_high_error": [],
         "noisy_spectral_high_error": [],
+        "clean_spectral_multiband_error_vs_clean_gt": [],
+        "noisy_spectral_multiband_error_vs_clean_gt": [],
+        "clean_spectral_low_error_vs_clean_gt": [],
+        "noisy_spectral_low_error_vs_clean_gt": [],
+        "clean_spectral_mid_error_vs_clean_gt": [],
+        "noisy_spectral_mid_error_vs_clean_gt": [],
+        "clean_spectral_high_error_vs_clean_gt": [],
+        "noisy_spectral_high_error_vs_clean_gt": [],
+        "clean_fourier_coeff_mse_multiband_vs_clean_gt": [],
+        "noisy_fourier_coeff_mse_multiband_vs_clean_gt": [],
+        "clean_fourier_coeff_mse_low_vs_clean_gt": [],
+        "noisy_fourier_coeff_mse_low_vs_clean_gt": [],
+        "clean_fourier_coeff_mse_mid_vs_clean_gt": [],
+        "noisy_fourier_coeff_mse_mid_vs_clean_gt": [],
+        "clean_fourier_coeff_mse_high_vs_clean_gt": [],
+        "noisy_fourier_coeff_mse_high_vs_clean_gt": [],
     }
     spectral_band_labels = list(rsd.spectral_band_labels)
     for band_label in spectral_band_labels:
         metrics[f"clean_spectral_band_error_{band_label}"] = []
         metrics[f"noisy_spectral_band_error_{band_label}"] = []
+        metrics[f"clean_spectral_band_error_vs_clean_gt_{band_label}"] = []
+        metrics[f"noisy_spectral_band_error_vs_clean_gt_{band_label}"] = []
+        metrics[f"clean_fourier_coeff_mse_band_vs_clean_gt_{band_label}"] = []
+        metrics[f"noisy_fourier_coeff_mse_band_vs_clean_gt_{band_label}"] = []
 
     rollout_context: int | None = temporal_window if temporal_enabled else None
 
@@ -619,13 +640,55 @@ def run_single_seed(
         metrics["noisy_spectral_mid_error"].append(noisy_stats["spectral_mid_error"])
         metrics["clean_spectral_high_error"].append(clean_stats["spectral_high_error"])
         metrics["noisy_spectral_high_error"].append(noisy_stats["spectral_high_error"])
+        metrics["clean_spectral_multiband_error_vs_clean_gt"].append(
+            clean_stats["spectral_multiband_error_vs_clean_gt"]
+        )
+        metrics["noisy_spectral_multiband_error_vs_clean_gt"].append(
+            noisy_stats["spectral_multiband_error_vs_clean_gt"]
+        )
+        metrics["clean_spectral_low_error_vs_clean_gt"].append(clean_stats["spectral_low_error_vs_clean_gt"])
+        metrics["noisy_spectral_low_error_vs_clean_gt"].append(noisy_stats["spectral_low_error_vs_clean_gt"])
+        metrics["clean_spectral_mid_error_vs_clean_gt"].append(clean_stats["spectral_mid_error_vs_clean_gt"])
+        metrics["noisy_spectral_mid_error_vs_clean_gt"].append(noisy_stats["spectral_mid_error_vs_clean_gt"])
+        metrics["clean_spectral_high_error_vs_clean_gt"].append(clean_stats["spectral_high_error_vs_clean_gt"])
+        metrics["noisy_spectral_high_error_vs_clean_gt"].append(noisy_stats["spectral_high_error_vs_clean_gt"])
+        metrics["clean_fourier_coeff_mse_multiband_vs_clean_gt"].append(
+            clean_stats["fourier_coeff_mse_multiband_vs_clean_gt"]
+        )
+        metrics["noisy_fourier_coeff_mse_multiband_vs_clean_gt"].append(
+            noisy_stats["fourier_coeff_mse_multiband_vs_clean_gt"]
+        )
+        metrics["clean_fourier_coeff_mse_low_vs_clean_gt"].append(
+            clean_stats["fourier_coeff_mse_low_vs_clean_gt"]
+        )
+        metrics["noisy_fourier_coeff_mse_low_vs_clean_gt"].append(
+            noisy_stats["fourier_coeff_mse_low_vs_clean_gt"]
+        )
+        metrics["clean_fourier_coeff_mse_mid_vs_clean_gt"].append(
+            clean_stats["fourier_coeff_mse_mid_vs_clean_gt"]
+        )
+        metrics["noisy_fourier_coeff_mse_mid_vs_clean_gt"].append(
+            noisy_stats["fourier_coeff_mse_mid_vs_clean_gt"]
+        )
+        metrics["clean_fourier_coeff_mse_high_vs_clean_gt"].append(
+            clean_stats["fourier_coeff_mse_high_vs_clean_gt"]
+        )
+        metrics["noisy_fourier_coeff_mse_high_vs_clean_gt"].append(
+            noisy_stats["fourier_coeff_mse_high_vs_clean_gt"]
+        )
 
-        for band_idx, band_value in enumerate(clean_stats["spectral_band_error"]):
-            band_key = f"clean_spectral_band_error_{spectral_band_labels[band_idx]}"
-            metrics[band_key].append(float(band_value))
-        for band_idx, band_value in enumerate(noisy_stats["spectral_band_error"]):
-            band_key = f"noisy_spectral_band_error_{spectral_band_labels[band_idx]}"
-            metrics[band_key].append(float(band_value))
+        for band_idx, band_label in enumerate(spectral_band_labels):
+            clean_band_fraction = float(clean_stats["spectral_band_error_vs_clean_gt"][band_idx])
+            noisy_band_fraction = float(noisy_stats["spectral_band_error_vs_clean_gt"][band_idx])
+            metrics[f"clean_spectral_band_error_{band_label}"].append(clean_band_fraction)
+            metrics[f"noisy_spectral_band_error_{band_label}"].append(noisy_band_fraction)
+            metrics[f"clean_spectral_band_error_vs_clean_gt_{band_label}"].append(clean_band_fraction)
+            metrics[f"noisy_spectral_band_error_vs_clean_gt_{band_label}"].append(noisy_band_fraction)
+
+            clean_band_coeff_mse = float(clean_stats["fourier_coeff_mse_band_vs_clean_gt"][band_idx])
+            noisy_band_coeff_mse = float(noisy_stats["fourier_coeff_mse_band_vs_clean_gt"][band_idx])
+            metrics[f"clean_fourier_coeff_mse_band_vs_clean_gt_{band_label}"].append(clean_band_coeff_mse)
+            metrics[f"noisy_fourier_coeff_mse_band_vs_clean_gt_{band_label}"].append(noisy_band_coeff_mse)
 
     test_case_index = int(np.clip(test_case_index, 0, len(test_cases) - 1))
     test_case = test_cases[test_case_index]
@@ -791,6 +854,11 @@ def run_single_seed(
         "spectral_low_error",
         "spectral_mid_error",
         "spectral_high_error",
+        "spectral_multiband_error_vs_clean_gt",
+        "fourier_coeff_mse_multiband_vs_clean_gt",
+        "fourier_coeff_mse_low_vs_clean_gt",
+        "fourier_coeff_mse_mid_vs_clean_gt",
+        "fourier_coeff_mse_high_vs_clean_gt",
     ]
     metric_vs_l2 = _build_metric_vs_l2(metrics, compare_metric_ids)
     clean_spectral_band_error_mean = [
@@ -801,6 +869,62 @@ def run_single_seed(
         _safe_mean(metrics[f"noisy_spectral_band_error_{label}"])
         for label in spectral_band_labels
     ]
+    clean_spectral_band_error_vs_clean_gt_mean = [
+        _safe_mean(metrics[f"clean_spectral_band_error_vs_clean_gt_{label}"])
+        for label in spectral_band_labels
+    ]
+    noisy_spectral_band_error_vs_clean_gt_mean = [
+        _safe_mean(metrics[f"noisy_spectral_band_error_vs_clean_gt_{label}"])
+        for label in spectral_band_labels
+    ]
+    clean_fourier_coeff_mse_band_vs_clean_gt_mean = [
+        _safe_mean(metrics[f"clean_fourier_coeff_mse_band_vs_clean_gt_{label}"])
+        for label in spectral_band_labels
+    ]
+    noisy_fourier_coeff_mse_band_vs_clean_gt_mean = [
+        _safe_mean(metrics[f"noisy_fourier_coeff_mse_band_vs_clean_gt_{label}"])
+        for label in spectral_band_labels
+    ]
+
+    bootstrap_n = 5000
+    bootstrap_ci_level = 0.95
+    bootstrap_seed_base = int(seed) * 100_000 + int(len(test_cases))
+    fraction_multiband_gap_bootstrap = _build_paired_bootstrap_gap(
+        metrics["clean_spectral_multiband_error_vs_clean_gt"],
+        metrics["noisy_spectral_multiband_error_vs_clean_gt"],
+        n_bootstrap=bootstrap_n,
+        ci_level=bootstrap_ci_level,
+        rng_seed=bootstrap_seed_base + 1,
+    )
+    coeff_mse_multiband_gap_bootstrap = _build_paired_bootstrap_gap(
+        metrics["clean_fourier_coeff_mse_multiband_vs_clean_gt"],
+        metrics["noisy_fourier_coeff_mse_multiband_vs_clean_gt"],
+        n_bootstrap=bootstrap_n,
+        ci_level=bootstrap_ci_level,
+        rng_seed=bootstrap_seed_base + 2,
+    )
+    fraction_band_gap_bootstrap = []
+    coeff_mse_band_gap_bootstrap = []
+    for band_idx, band_label in enumerate(spectral_band_labels):
+        fraction_band_gap_bootstrap.append(
+            _build_paired_bootstrap_gap(
+                metrics[f"clean_spectral_band_error_vs_clean_gt_{band_label}"],
+                metrics[f"noisy_spectral_band_error_vs_clean_gt_{band_label}"],
+                n_bootstrap=bootstrap_n,
+                ci_level=bootstrap_ci_level,
+                rng_seed=bootstrap_seed_base + 100 + band_idx,
+            )
+        )
+        coeff_mse_band_gap_bootstrap.append(
+            _build_paired_bootstrap_gap(
+                metrics[f"clean_fourier_coeff_mse_band_vs_clean_gt_{band_label}"],
+                metrics[f"noisy_fourier_coeff_mse_band_vs_clean_gt_{band_label}"],
+                n_bootstrap=bootstrap_n,
+                ci_level=bootstrap_ci_level,
+                rng_seed=bootstrap_seed_base + 1000 + band_idx,
+            )
+        )
+
     return {
         **mean_metrics,
         "metric_vs_l2": metric_vs_l2,
@@ -810,6 +934,45 @@ def run_single_seed(
             "centers": [float(v) for v in rsd.spectral_band_centers],
             "clean_band_error_mean": clean_spectral_band_error_mean,
             "noisy_band_error_mean": noisy_spectral_band_error_mean,
+            "clean_band_error_vs_clean_gt_mean": clean_spectral_band_error_vs_clean_gt_mean,
+            "noisy_band_error_vs_clean_gt_mean": noisy_spectral_band_error_vs_clean_gt_mean,
+            "clean_fourier_coeff_mse_band_vs_clean_gt_mean": clean_fourier_coeff_mse_band_vs_clean_gt_mean,
+            "noisy_fourier_coeff_mse_band_vs_clean_gt_mean": noisy_fourier_coeff_mse_band_vs_clean_gt_mean,
+        },
+        "spectral_clean_reference_checks": {
+            "bootstrap_config": {
+                "n_bootstrap": int(bootstrap_n),
+                "ci_level": float(bootstrap_ci_level),
+                "gap_definition": "noisy_minus_clean",
+            },
+            "fractional_band_error": {
+                "clean_multiband_mean": mean_metrics["clean_spectral_multiband_error_vs_clean_gt"],
+                "noisy_multiband_mean": mean_metrics["noisy_spectral_multiband_error_vs_clean_gt"],
+                "clean_low_mean": mean_metrics["clean_spectral_low_error_vs_clean_gt"],
+                "noisy_low_mean": mean_metrics["noisy_spectral_low_error_vs_clean_gt"],
+                "clean_mid_mean": mean_metrics["clean_spectral_mid_error_vs_clean_gt"],
+                "noisy_mid_mean": mean_metrics["noisy_spectral_mid_error_vs_clean_gt"],
+                "clean_high_mean": mean_metrics["clean_spectral_high_error_vs_clean_gt"],
+                "noisy_high_mean": mean_metrics["noisy_spectral_high_error_vs_clean_gt"],
+                "clean_band_error_mean": clean_spectral_band_error_vs_clean_gt_mean,
+                "noisy_band_error_mean": noisy_spectral_band_error_vs_clean_gt_mean,
+                "multiband_gap_bootstrap": fraction_multiband_gap_bootstrap,
+                "band_gap_bootstrap": fraction_band_gap_bootstrap,
+            },
+            "fourier_coeff_mse_band": {
+                "clean_multiband_mean": mean_metrics["clean_fourier_coeff_mse_multiband_vs_clean_gt"],
+                "noisy_multiband_mean": mean_metrics["noisy_fourier_coeff_mse_multiband_vs_clean_gt"],
+                "clean_low_mean": mean_metrics["clean_fourier_coeff_mse_low_vs_clean_gt"],
+                "noisy_low_mean": mean_metrics["noisy_fourier_coeff_mse_low_vs_clean_gt"],
+                "clean_mid_mean": mean_metrics["clean_fourier_coeff_mse_mid_vs_clean_gt"],
+                "noisy_mid_mean": mean_metrics["noisy_fourier_coeff_mse_mid_vs_clean_gt"],
+                "clean_high_mean": mean_metrics["clean_fourier_coeff_mse_high_vs_clean_gt"],
+                "noisy_high_mean": mean_metrics["noisy_fourier_coeff_mse_high_vs_clean_gt"],
+                "clean_band_mse_mean": clean_fourier_coeff_mse_band_vs_clean_gt_mean,
+                "noisy_band_mse_mean": noisy_fourier_coeff_mse_band_vs_clean_gt_mean,
+                "multiband_gap_bootstrap": coeff_mse_multiband_gap_bootstrap,
+                "band_gap_bootstrap": coeff_mse_band_gap_bootstrap,
+            },
         },
         "_viz": {
             "eval": {
@@ -860,11 +1023,31 @@ def run_single_seed(
                     "noisy_boundary_error": list(metrics["noisy_boundary_error"]),
                     "clean_spectral_multiband_error": list(metrics["clean_spectral_multiband_error"]),
                     "noisy_spectral_multiband_error": list(metrics["noisy_spectral_multiband_error"]),
+                    "clean_spectral_multiband_error_vs_clean_gt": list(
+                        metrics["clean_spectral_multiband_error_vs_clean_gt"]
+                    ),
+                    "noisy_spectral_multiband_error_vs_clean_gt": list(
+                        metrics["noisy_spectral_multiband_error_vs_clean_gt"]
+                    ),
+                    "clean_fourier_coeff_mse_multiband_vs_clean_gt": list(
+                        metrics["clean_fourier_coeff_mse_multiband_vs_clean_gt"]
+                    ),
+                    "noisy_fourier_coeff_mse_multiband_vs_clean_gt": list(
+                        metrics["noisy_fourier_coeff_mse_multiband_vs_clean_gt"]
+                    ),
                 },
                 "spectral_band_labels": spectral_band_labels,
                 "spectral_band_centers": [float(v) for v in rsd.spectral_band_centers],
                 "clean_spectral_band_error_mean": clean_spectral_band_error_mean,
                 "noisy_spectral_band_error_mean": noisy_spectral_band_error_mean,
+                "clean_spectral_band_error_vs_clean_gt_mean": clean_spectral_band_error_vs_clean_gt_mean,
+                "noisy_spectral_band_error_vs_clean_gt_mean": noisy_spectral_band_error_vs_clean_gt_mean,
+                "clean_fourier_coeff_mse_band_vs_clean_gt_mean": clean_fourier_coeff_mse_band_vs_clean_gt_mean,
+                "noisy_fourier_coeff_mse_band_vs_clean_gt_mean": noisy_fourier_coeff_mse_band_vs_clean_gt_mean,
+                "fraction_multiband_gap_bootstrap_noisy_minus_clean": fraction_multiband_gap_bootstrap,
+                "coeff_mse_multiband_gap_bootstrap_noisy_minus_clean": coeff_mse_multiband_gap_bootstrap,
+                "fraction_band_gap_bootstrap_noisy_minus_clean": fraction_band_gap_bootstrap,
+                "coeff_mse_band_gap_bootstrap_noisy_minus_clean": coeff_mse_band_gap_bootstrap,
             },
         },
         "_resolved_device": str(model_clean.device),
@@ -1051,8 +1234,10 @@ def main() -> None:
 
     if artifacts.get("save_figures", True):
         from utils.plotting import (
+            save_band_profile_plot,
             save_clean_noisy_metric_bar,
             save_clean_noisy_summary_plot,
+            save_dual_band_gap_bootstrap_plot,
             save_metric_vs_l2_grid,
             save_spectral_band_error_plot,
         )
@@ -1087,6 +1272,13 @@ def main() -> None:
             output_path=run_out_dir / "spectral_multiband_error.png",
             title="Multi-band spectral error",
         )
+        save_clean_noisy_metric_bar(
+            results["clean_fourier_coeff_mse_multiband_vs_clean_gt"],
+            results["noisy_fourier_coeff_mse_multiband_vs_clean_gt"],
+            metric_label="Multi-band Fourier coeff-MSE",
+            output_path=run_out_dir / "fourier_coeff_mse_multiband.png",
+            title="Multi-band Fourier coeff-MSE (vs clean GT)",
+        )
 
         diagnostics_viz = viz_payload.get("diagnostics", {})
         save_spectral_band_error_plot(
@@ -1096,6 +1288,23 @@ def main() -> None:
             band_centers=diagnostics_viz.get("spectral_band_centers", []),
             output_path=run_out_dir / "spectral_band_error_profile.png",
             title="Per-band spectral error profile",
+        )
+        save_band_profile_plot(
+            clean_band_values=diagnostics_viz.get("clean_fourier_coeff_mse_band_vs_clean_gt_mean", []),
+            noisy_band_values=diagnostics_viz.get("noisy_fourier_coeff_mse_band_vs_clean_gt_mean", []),
+            band_labels=diagnostics_viz.get("spectral_band_labels", []),
+            band_centers=diagnostics_viz.get("spectral_band_centers", []),
+            output_path=run_out_dir / "fourier_coeff_mse_band_profile.png",
+            title="Per-band Fourier coeff-MSE vs clean GT",
+            y_label="Fourier coefficient MSE",
+        )
+        save_dual_band_gap_bootstrap_plot(
+            band_labels=diagnostics_viz.get("spectral_band_labels", []),
+            band_centers=diagnostics_viz.get("spectral_band_centers", []),
+            fraction_gap_bootstrap=diagnostics_viz.get("fraction_band_gap_bootstrap_noisy_minus_clean", []),
+            coeff_mse_gap_bootstrap=diagnostics_viz.get("coeff_mse_band_gap_bootstrap_noisy_minus_clean", []),
+            output_path=run_out_dir / "spectral_gap_bootstrap_ci.png",
+            title="Bootstrap CI: spectral gap (noisy-clean, vs clean GT)",
         )
 
         diagnostic_series = diagnostics_viz.get("series", {})
@@ -1122,6 +1331,10 @@ def main() -> None:
                 "Spectral Multi-band Error": {
                     "clean": diagnostic_series.get("clean_spectral_multiband_error", []),
                     "noisy": diagnostic_series.get("noisy_spectral_multiband_error", []),
+                },
+                "Fourier Coeff MSE": {
+                    "clean": diagnostic_series.get("clean_fourier_coeff_mse_multiband_vs_clean_gt", []),
+                    "noisy": diagnostic_series.get("noisy_fourier_coeff_mse_multiband_vs_clean_gt", []),
                 },
             },
             output_path=run_out_dir / "metrics_vs_l2.png",
@@ -1278,14 +1491,14 @@ def main() -> None:
             step_indices=step_indices,
             output_path=fit_dir / "trajectory_u_fields.png",
             title="Trajectory snapshots | Species u",
-            cmap="turbo",
+            cmap="viridis",
         )
         save_trajectory_field_rows(
             v_field_rows,
             step_indices=step_indices,
             output_path=fit_dir / "trajectory_v_fields.png",
             title="Trajectory snapshots | Species v",
-            cmap="turbo",
+            cmap="viridis",
         )
 
         save_trajectory_error_rows(
@@ -1293,12 +1506,14 @@ def main() -> None:
             step_indices=step_indices,
             output_path=fit_dir / "trajectory_u_error.png",
             title="Trajectory absolute error snapshots | Species u",
+            cmap="magma",
         )
         save_trajectory_error_rows(
             v_rows,
             step_indices=step_indices,
             output_path=fit_dir / "trajectory_v_error.png",
             title="Trajectory absolute error snapshots | Species v",
+            cmap="magma",
         )
     print("Run complete")
     print(f"Device: requested={requested_device} resolved={resolved_device}")

@@ -18,6 +18,93 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 import numpy as np
 
+PUB_DPI = 300
+METHOD_COLORS = {
+    "clean": "#0072B2",
+    "noisy": "#D55E00",
+}
+REFERENCE_COLORS = {
+    "clean_gt": "#1B9E77",
+    "noisy_gt": "#E6AB02",
+}
+
+
+def _set_pub_rcparams() -> None:
+    """Apply publication defaults consistently across all generated figures."""
+    plt.rcParams.update(
+        {
+            "font.family": "DejaVu Sans",
+            "font.size": 10,
+            "axes.labelsize": 10,
+            "axes.titlesize": 10,
+            "legend.fontsize": 9,
+            "xtick.labelsize": 9,
+            "ytick.labelsize": 9,
+            "axes.linewidth": 0.8,
+            "lines.linewidth": 1.2,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    )
+
+
+_set_pub_rcparams()
+
+
+def _color_for_label(label: str) -> str:
+    text = str(label).lower()
+    if "clean pred" in text:
+        return METHOD_COLORS["clean"]
+    if "noisy pred" in text:
+        return METHOD_COLORS["noisy"]
+    if "clean gt" in text:
+        return REFERENCE_COLORS["clean_gt"]
+    if "noisy gt" in text:
+        return REFERENCE_COLORS["noisy_gt"]
+    if "noisy" in text and "clean" not in text:
+        return METHOD_COLORS["noisy"]
+    if "clean" in text and "noisy" not in text:
+        return METHOD_COLORS["clean"]
+    return "#444444"
+
+
+def _add_legend(
+    fig: plt.Figure,
+    ax: plt.Axes,
+    handles: List[Line2D | Patch],
+    *,
+    is_multi_panel: bool,
+    single_loc: str = "upper right",
+    single_ncol: int = 1,
+    multi_ncol: int | None = None,
+) -> None:
+    if is_multi_panel:
+        fig.legend(
+            handles=handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.995),
+            ncol=max(1, int(multi_ncol if multi_ncol is not None else len(handles))),
+            frameon=False,
+        )
+        return
+
+    ax.legend(
+        handles=handles,
+        loc=single_loc,
+        ncol=max(1, int(single_ncol)),
+        frameon=False,
+    )
+
+
+def _style_table_cell(ax: plt.Axes) -> None:
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.tick_params(which="both", bottom=False, left=False, labelbottom=False, labelleft=False)
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(0.8)
+        spine.set_edgecolor("#222222")
+
 
 def _shared_field_norm(
     frames: List[np.ndarray],
@@ -81,12 +168,11 @@ def _ordered_unique(labels: List[str]) -> List[str]:
     return ordered
 
 
-def _row_label_colors(labels: List[str]) -> Dict[str, tuple]:
+def _row_label_colors(labels: List[str]) -> Dict[str, str]:
     unique_labels = _ordered_unique(labels)
-    palette = plt.get_cmap("tab20")
     return {
-        label: palette(idx % palette.N)
-        for idx, label in enumerate(unique_labels)
+        label: _color_for_label(label)
+        for label in unique_labels
     }
 
 
@@ -101,6 +187,7 @@ def save_clean_noisy_summary_plot(
     output_path: str | Path,
 ) -> None:
     """Save a compact clean-vs-noisy comparison chart for one run."""
+    _ = title
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -112,16 +199,27 @@ def save_clean_noisy_summary_plot(
     width = 0.35
 
     fig, ax = plt.subplots(figsize=(6.2, 3.4))
-    ax.bar([i - width / 2 for i in x], clean_values, width=width, label="Clean", color="#0072B2")
-    ax.bar([i + width / 2 for i in x], noisy_values, width=width, label="Noisy", color="#D55E00")
+    ax.bar([i - width / 2 for i in x], clean_values, width=width, label="Clean", color=METHOD_COLORS["clean"])
+    ax.bar([i + width / 2 for i in x], noisy_values, width=width, label="Noisy", color=METHOD_COLORS["noisy"])
 
     ax.set_xticks(list(x))
     ax.set_xticklabels(labels)
     ax.set_ylabel("Metric value")
-    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=True)
+    ax.grid(alpha=0.25, linestyle="--", linewidth=0.7, axis="y")
+    _add_legend(
+        fig,
+        ax,
+        [
+            Patch(facecolor=METHOD_COLORS["clean"], edgecolor="none", label="Clean"),
+            Patch(facecolor=METHOD_COLORS["noisy"], edgecolor="none", label="Noisy"),
+        ],
+        is_multi_panel=False,
+        single_loc="upper right",
+        single_ncol=2,
+    )
 
-    fig.subplots_adjust(right=0.84)
-    fig.savefig(path, dpi=200)
+    fig.tight_layout()
+    fig.savefig(path, dpi=PUB_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -139,6 +237,7 @@ def save_scalar_fit_panel(
     model_label: str = "Model",
 ) -> None:
     """Save scalar fit diagnostics with clean/noisy ground-truth comparison."""
+    _ = title
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -153,15 +252,15 @@ def save_scalar_fit_panel(
 
     fig, axes = plt.subplots(1, 6, figsize=(16.8, 3.2))
     panels = [
-        (inp, "Input", input_cmap, "field"),
-        (clean_target, "Clean Ground Truth", cmap, "field"),
-        (noisy_target, "Noisy Ground Truth", cmap, "field"),
-        (pred, "Predicted", cmap, "field"),
-        (err_vs_clean, "Abs Error vs Clean GT", "magma", "error"),
-        (err_vs_noisy, "Abs Error vs Noisy GT", "magma", "error"),
+        (inp, input_cmap, "field"),
+        (clean_target, cmap, "field"),
+        (noisy_target, cmap, "field"),
+        (pred, cmap, "field"),
+        (err_vs_clean, "magma", "error"),
+        (err_vs_noisy, "magma", "error"),
     ]
 
-    for idx, (data, name, panel_cmap, panel_kind) in enumerate(panels):
+    for idx, (data, panel_cmap, panel_kind) in enumerate(panels):
         ax = axes[idx]
         if idx == 0:
             im = ax.imshow(data, cmap=panel_cmap, norm=field_norm)
@@ -173,7 +272,6 @@ def save_scalar_fit_panel(
             im = ax.imshow(data, cmap=panel_cmap, norm=field_norm)
         else:
             im = ax.imshow(data, cmap=panel_cmap)
-        ax.set_title(name)
         _annotate_min_max(ax, data)
         if idx == 0:
             ax.set_ylabel(model_label, rotation=90, labelpad=8, fontsize=9)
@@ -185,16 +283,16 @@ def save_scalar_fit_panel(
         _legend_patch(cmap, "Field colormap"),
         _legend_patch("magma", "Error colormap"),
     ]
-    fig.legend(
-        handles=legend_handles,
-        loc="center left",
-        bbox_to_anchor=(0.86, 0.5),
-        frameon=True,
-        fontsize=8,
+    _add_legend(
+        fig,
+        axes[0],
+        legend_handles,
+        is_multi_panel=True,
+        multi_ncol=len(legend_handles),
     )
 
-    fig.subplots_adjust(left=0.05, right=0.84, top=0.92, bottom=0.08, wspace=0.28)
-    fig.savefig(path, dpi=200)
+    fig.subplots_adjust(left=0.05, right=0.95, top=0.86, bottom=0.08, wspace=0.28)
+    fig.savefig(path, dpi=PUB_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -216,6 +314,7 @@ def save_coupled_fit_panel(
     model_label: str = "Model",
 ) -> None:
     """Save coupled fit diagnostics with clean/noisy ground-truth comparison."""
+    _ = title
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -229,14 +328,6 @@ def save_coupled_fit_panel(
     input_v_arr = np.asarray(input_v, dtype=np.float32)
 
     fig, axes = plt.subplots(2, 6, figsize=(16.8, 6.0))
-    col_titles = [
-        "Input",
-        "Clean Ground Truth",
-        "Noisy Ground Truth",
-        "Predicted",
-        "Abs Error vs Clean GT",
-        "Abs Error vs Noisy GT",
-    ]
     rows = [
         (
             "u",
@@ -281,8 +372,6 @@ def save_coupled_fit_panel(
                 im = ax.imshow(data, cmap=panel_cmap, norm=field_norm)
             else:
                 im = ax.imshow(data, cmap=panel_cmap)
-            if row_idx == 0:
-                ax.set_title(col_titles[col_idx])
             if col_idx == 0:
                 ax.set_ylabel(f"{model_label} {name}", rotation=90, labelpad=8, fontsize=9)
             _annotate_min_max(ax, data)
@@ -294,15 +383,15 @@ def save_coupled_fit_panel(
         _legend_patch(output_cmap, "Field colormap"),
         _legend_patch("magma", "Error colormap"),
     ]
-    fig.legend(
-        handles=legend_handles,
-        loc="center left",
-        bbox_to_anchor=(0.86, 0.5),
-        frameon=True,
-        fontsize=8,
+    _add_legend(
+        fig,
+        axes[0, 0],
+        legend_handles,
+        is_multi_panel=True,
+        multi_ncol=len(legend_handles),
     )
-    fig.subplots_adjust(left=0.05, right=0.84, top=0.93, bottom=0.05, wspace=0.28, hspace=0.22)
-    fig.savefig(path, dpi=200)
+    fig.subplots_adjust(left=0.05, right=0.95, top=0.88, bottom=0.05, wspace=0.28, hspace=0.22)
+    fig.savefig(path, dpi=PUB_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -311,10 +400,11 @@ def save_trajectory_error_rows(
     step_indices: List[int],
     output_path: str | Path,
     title: str,
-    cmap: str = "inferno",
+    cmap: str = "magma",
     gamma: float = 0.55,
 ) -> None:
     """Save multi-row trajectory absolute-error heatmaps at selected timesteps."""
+    _ = title
     if not rows:
         return
     if not step_indices:
@@ -347,32 +437,29 @@ def save_trajectory_error_rows(
                 vmax_panel = 1e-12
             norm = mcolors.PowerNorm(gamma=max(0.05, float(gamma)), vmin=0.0, vmax=vmax_panel)
             last_im = ax.imshow(err, cmap=cmap, norm=norm)
-            ax.axis("off")
+            _style_table_cell(ax)
             _annotate_min_max(ax, err)
 
             if row_idx == 0:
-                ax.set_title(f"t={idx}")
+                ax.set_xlabel(f"t = {int(step)}")
+                ax.xaxis.set_label_position("top")
             if col_idx == 0:
-                ax.set_ylabel(label, rotation=0, labelpad=54, va="center", color=label_colors[label], fontsize=8)
+                ax.set_ylabel(
+                    label,
+                    rotation=0,
+                    labelpad=58,
+                    ha="right",
+                    va="center",
+                    color=label_colors[label],
+                    fontsize=9,
+                )
 
     if last_im is not None:
         cbar = fig.colorbar(last_im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
         cbar.set_label("Absolute error")
 
-    legend_handles = [
-        Line2D([0], [0], color=label_colors[label], lw=3, label=label)
-        for label in _ordered_unique(labels)
-    ]
-    fig.legend(
-        handles=legend_handles,
-        loc="center left",
-        bbox_to_anchor=(0.82, 0.5),
-        frameon=True,
-        fontsize=7,
-    )
-
-    fig.subplots_adjust(left=0.08, right=0.79, top=0.93, bottom=0.04, wspace=0.02, hspace=0.08)
-    fig.savefig(path, dpi=200)
+    fig.subplots_adjust(left=0.2, right=0.94, top=0.9, bottom=0.04, wspace=0.02, hspace=0.08)
+    fig.savefig(path, dpi=PUB_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -381,9 +468,10 @@ def save_trajectory_field_rows(
     step_indices: List[int],
     output_path: str | Path,
     title: str,
-    cmap: str = "turbo",
+    cmap: str = "viridis",
 ) -> None:
     """Save multi-row trajectory field snapshots at selected timesteps."""
+    _ = title
     if not rows:
         return
     if not step_indices:
@@ -417,32 +505,29 @@ def save_trajectory_field_rows(
             frame = traj[idx]
             ax = axes[row_idx, col_idx]
             last_im = ax.imshow(frame, cmap=cmap, norm=shared_norm)
-            ax.axis("off")
+            _style_table_cell(ax)
             _annotate_min_max(ax, frame)
 
             if row_idx == 0:
-                ax.set_title(f"t={idx}")
+                ax.set_xlabel(f"t = {int(step)}")
+                ax.xaxis.set_label_position("top")
             if col_idx == 0:
-                ax.set_ylabel(label, rotation=0, labelpad=56, va="center", color=label_colors[label], fontsize=8)
+                ax.set_ylabel(
+                    label,
+                    rotation=0,
+                    labelpad=58,
+                    ha="right",
+                    va="center",
+                    color=label_colors[label],
+                    fontsize=9,
+                )
 
     if last_im is not None:
         cbar = fig.colorbar(last_im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
         cbar.set_label("Field value (shared scale)")
 
-    legend_handles = [
-        Line2D([0], [0], color=label_colors[label], lw=3, label=label)
-        for label in _ordered_unique(labels)
-    ]
-    fig.legend(
-        handles=legend_handles,
-        loc="center left",
-        bbox_to_anchor=(0.82, 0.5),
-        frameon=True,
-        fontsize=7,
-    )
-
-    fig.subplots_adjust(left=0.1, right=0.79, top=0.93, bottom=0.04, wspace=0.02, hspace=0.08)
-    fig.savefig(path, dpi=200)
+    fig.subplots_adjust(left=0.2, right=0.94, top=0.9, bottom=0.04, wspace=0.02, hspace=0.08)
+    fig.savefig(path, dpi=PUB_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -461,17 +546,18 @@ def save_clean_noisy_metric_bar(
     title: str,
 ) -> None:
     """Save a 2-bar clean/noisy chart for one scalar diagnostic."""
+    _ = title
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     labels = ["Clean", "Noisy"]
     values = [float(clean_value), float(noisy_value)]
-    colors = ["#0072B2", "#D55E00"]
+    colors = [METHOD_COLORS["clean"], METHOD_COLORS["noisy"]]
 
     fig, ax = plt.subplots(figsize=(4.6, 3.4))
     bars = ax.bar(labels, values, color=colors, width=0.65)
     ax.set_ylabel(metric_label)
-    ax.set_title(title)
+    ax.grid(alpha=0.25, linestyle="--", linewidth=0.7, axis="y")
     ymax = max([v for v in values if np.isfinite(v)] + [1e-12])
     ax.set_ylim(0.0, ymax * 1.15)
     for bar, value in zip(bars, values):
@@ -485,7 +571,72 @@ def save_clean_noisy_metric_bar(
                 fontsize=8,
             )
     fig.tight_layout()
-    fig.savefig(path, dpi=200)
+    fig.savefig(path, dpi=PUB_DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _band_axis_values(
+    n_bands: int,
+    band_labels: List[str],
+    band_centers: List[float] | None = None,
+) -> tuple[np.ndarray, str, List[str]]:
+    labels = [str(lbl) for lbl in band_labels[:n_bands]]
+    x = np.arange(1, n_bands + 1, dtype=np.float64)
+    xlabel = "Spectral band index"
+    if band_centers is not None:
+        centers = np.asarray(band_centers[:n_bands], dtype=np.float64)
+        if centers.size == n_bands and np.all(np.isfinite(centers)):
+            x = centers
+            xlabel = "Band center wavenumber"
+    return x, xlabel, labels
+
+
+def save_band_profile_plot(
+    clean_band_values: List[float],
+    noisy_band_values: List[float],
+    band_labels: List[str],
+    output_path: str | Path,
+    title: str,
+    y_label: str,
+    band_centers: List[float] | None = None,
+) -> None:
+    """Save clean/noisy per-band profile for any bandwise metric."""
+    _ = title
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    clean = np.asarray(clean_band_values, dtype=np.float64)
+    noisy = np.asarray(noisy_band_values, dtype=np.float64)
+    n_bands = min(clean.size, noisy.size, len(band_labels))
+    if n_bands <= 0:
+        return
+
+    clean = clean[:n_bands]
+    noisy = noisy[:n_bands]
+    x, xlabel, labels = _band_axis_values(n_bands, band_labels, band_centers)
+
+    fig, ax = plt.subplots(figsize=(6.2, 3.8))
+    ax.plot(x, clean, marker="o", color=METHOD_COLORS["clean"], label="Clean")
+    ax.plot(x, noisy, marker="o", color=METHOD_COLORS["noisy"], label="Noisy")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(y_label)
+    if xlabel == "Spectral band index":
+        ax.set_xticks(np.arange(1, n_bands + 1, dtype=np.float64))
+        ax.set_xticklabels(labels, rotation=0)
+    ax.grid(alpha=0.25, linestyle="--", linewidth=0.7)
+    _add_legend(
+        fig,
+        ax,
+        [
+            Line2D([0], [0], color=METHOD_COLORS["clean"], marker="o", label="Clean"),
+            Line2D([0], [0], color=METHOD_COLORS["noisy"], marker="o", label="Noisy"),
+        ],
+        is_multi_panel=False,
+        single_loc="upper right",
+        single_ncol=2,
+    )
+    fig.tight_layout()
+    fig.savefig(path, dpi=PUB_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -498,40 +649,97 @@ def save_spectral_band_error_plot(
     band_centers: List[float] | None = None,
 ) -> None:
     """Save clean/noisy spectral band-error profile."""
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    save_band_profile_plot(
+        clean_band_values=clean_band_error,
+        noisy_band_values=noisy_band_error,
+        band_labels=band_labels,
+        output_path=output_path,
+        title=title,
+        y_label="Abs band-fraction error",
+        band_centers=band_centers,
+    )
 
-    clean = np.asarray(clean_band_error, dtype=np.float64)
-    noisy = np.asarray(noisy_band_error, dtype=np.float64)
-    n_bands = min(clean.size, noisy.size, len(band_labels))
+
+def _bootstrap_gap_arrays(
+    bootstrap_rows: List[Mapping[str, float]],
+    n_bands: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    mean = np.full((n_bands,), np.nan, dtype=np.float64)
+    low = np.full((n_bands,), np.nan, dtype=np.float64)
+    high = np.full((n_bands,), np.nan, dtype=np.float64)
+    for idx in range(min(n_bands, len(bootstrap_rows))):
+        row = bootstrap_rows[idx]
+        mean[idx] = float(row.get("gap_mean", np.nan))
+        low[idx] = float(row.get("ci_low", np.nan))
+        high[idx] = float(row.get("ci_high", np.nan))
+    return mean, low, high
+
+
+def save_dual_band_gap_bootstrap_plot(
+    band_labels: List[str],
+    fraction_gap_bootstrap: List[Mapping[str, float]],
+    coeff_mse_gap_bootstrap: List[Mapping[str, float]],
+    output_path: str | Path,
+    title: str,
+    band_centers: List[float] | None = None,
+) -> None:
+    """Save 95% bootstrap CIs for noisy-clean spectral gaps (fractional + coeff-MSE)."""
+    _ = title
+    n_bands = len(band_labels)
     if n_bands <= 0:
         return
 
-    clean = clean[:n_bands]
-    noisy = noisy[:n_bands]
-    labels = [str(lbl) for lbl in band_labels[:n_bands]]
+    frac_mean, frac_low, frac_high = _bootstrap_gap_arrays(fraction_gap_bootstrap, n_bands)
+    coeff_mean, coeff_low, coeff_high = _bootstrap_gap_arrays(coeff_mse_gap_bootstrap, n_bands)
+    if not (
+        np.any(np.isfinite(frac_mean))
+        or np.any(np.isfinite(frac_low))
+        or np.any(np.isfinite(frac_high))
+        or np.any(np.isfinite(coeff_mean))
+        or np.any(np.isfinite(coeff_low))
+        or np.any(np.isfinite(coeff_high))
+    ):
+        return
 
-    x = np.arange(1, n_bands + 1, dtype=np.float64)
-    xlabel = "Spectral band index"
-    if band_centers is not None:
-        centers = np.asarray(band_centers[:n_bands], dtype=np.float64)
-        if centers.size == n_bands and np.all(np.isfinite(centers)):
-            x = centers
-            xlabel = "Band center wavenumber"
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, ax = plt.subplots(figsize=(6.2, 3.8))
-    ax.plot(x, clean, marker="o", color="#0072B2", label="Clean")
-    ax.plot(x, noisy, marker="o", color="#D55E00", label="Noisy")
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Abs band-fraction error")
-    ax.set_title(title)
-    if xlabel == "Spectral band index":
-        ax.set_xticks(np.arange(1, n_bands + 1, dtype=np.float64))
-        ax.set_xticklabels(labels, rotation=0)
-    ax.grid(alpha=0.25, linestyle="--", linewidth=0.7)
-    ax.legend(frameon=True)
+    x, xlabel, labels = _band_axis_values(n_bands, band_labels, band_centers)
+    fig, axes = plt.subplots(1, 2, figsize=(11.2, 4.0), squeeze=False)
+    panels = [
+        (
+            axes[0, 0],
+            frac_mean,
+            frac_low,
+            frac_high,
+            "Band-fraction gap (noisy-clean)",
+            "#7B3294",
+        ),
+        (
+            axes[0, 1],
+            coeff_mean,
+            coeff_low,
+            coeff_high,
+            "Fourier coeff-MSE gap (noisy-clean)",
+            "#008837",
+        ),
+    ]
+
+    for ax, mean, low, high, ylabel, color in panels:
+        finite_mask = np.isfinite(mean) & np.isfinite(low) & np.isfinite(high)
+        if np.any(finite_mask):
+            ax.fill_between(x[finite_mask], low[finite_mask], high[finite_mask], color=color, alpha=0.22)
+            ax.plot(x[finite_mask], mean[finite_mask], color=color, marker="o", linewidth=1.4)
+        ax.axhline(0.0, color="black", linewidth=0.9, linestyle="--", alpha=0.6)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        if xlabel == "Spectral band index":
+            ax.set_xticks(np.arange(1, n_bands + 1, dtype=np.float64))
+            ax.set_xticklabels(labels, rotation=0)
+        ax.grid(alpha=0.25, linestyle="--", linewidth=0.6)
+
     fig.tight_layout()
-    fig.savefig(path, dpi=200)
+    fig.savefig(path, dpi=PUB_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -543,6 +751,7 @@ def save_metric_vs_l2_grid(
     title: str,
 ) -> None:
     """Save metric-vs-L2 scatter grid for clean/noisy trajectories."""
+    _ = title
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not metric_series:
@@ -559,8 +768,8 @@ def save_metric_vs_l2_grid(
         clean_vals = np.asarray(payload.get("clean", []), dtype=np.float64)
         noisy_vals = np.asarray(payload.get("noisy", []), dtype=np.float64)
         panels = [
-            (axes[row_idx, 0], l2_clean_arr, clean_vals, "Clean", "#0072B2"),
-            (axes[row_idx, 1], l2_noisy_arr, noisy_vals, "Noisy", "#D55E00"),
+            (axes[row_idx, 0], l2_clean_arr, clean_vals, "Clean", METHOD_COLORS["clean"]),
+            (axes[row_idx, 1], l2_noisy_arr, noisy_vals, "Noisy", METHOD_COLORS["noisy"]),
         ]
         for ax, x_raw, y_raw, label, color in panels:
             x, y = _finite_pairs(x_raw, y_raw)
@@ -576,17 +785,32 @@ def save_metric_vs_l2_grid(
                     x_line = np.linspace(float(np.min(x)), float(np.max(x)), 100)
                     y_line = coeff[0] * x_line + coeff[1]
                     ax.plot(x_line, y_line, color=color, linewidth=1.2, alpha=0.85)
-                    ax.set_title(f"{metric_name} vs L2 ({label})  r={corr:.2f}", fontsize=9)
-                else:
-                    ax.set_title(f"{metric_name} vs L2 ({label})", fontsize=9)
-            else:
-                ax.set_title(f"{metric_name} vs L2 ({label})", fontsize=9)
+                    ax.text(
+                        0.02,
+                        0.97,
+                        f"r={corr:.2f}",
+                        transform=ax.transAxes,
+                        ha="left",
+                        va="top",
+                        fontsize=8,
+                        color="#222222",
+                        bbox={"facecolor": "white", "alpha": 0.75, "pad": 1.8, "edgecolor": "none"},
+                    )
 
             ax.set_xlabel("L2")
-            ax.set_ylabel(metric_name)
+            ax.set_ylabel(f"{metric_name} ({label})")
             ax.grid(alpha=0.25, linestyle="--", linewidth=0.6)
 
-    fig.suptitle(title, fontsize=11)
-    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.98])
-    fig.savefig(path, dpi=200)
+    _add_legend(
+        fig,
+        axes[0, 0],
+        [
+            Line2D([0], [0], marker="o", linestyle="-", color=METHOD_COLORS["clean"], label="Clean"),
+            Line2D([0], [0], marker="o", linestyle="-", color=METHOD_COLORS["noisy"], label="Noisy"),
+        ],
+        is_multi_panel=True,
+        multi_ncol=2,
+    )
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.95])
+    fig.savefig(path, dpi=PUB_DPI, bbox_inches="tight")
     plt.close(fig)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
-from scipy.fft import dctn, fft2, fftfreq, ifft2
+from scipy.fft import fft2, fftfreq, ifft2
 
 from data.navier_stokes import NSConfig, NavierStokes2D
 from data.reaction_diffusion import GrayScottConfig
@@ -104,11 +104,13 @@ class _FourierMultiBandAnalyzer2D:
         self.band_labels: List[str] = [f"b{idx + 1:02d}" for idx in range(self.n_bands)]
         self.band_centers: List[float] = []
         self._band_masks: List[np.ndarray] = []
+        self._band_counts: List[int] = []
 
         if nonzero_k.size == 0:
             for _ in range(self.n_bands):
                 self.band_centers.append(float("nan"))
                 self._band_masks.append(np.zeros_like(self._k_mag, dtype=bool))
+                self._band_counts.append(0)
             return
 
         sorted_pos = np.argsort(nonzero_k, kind="mergesort")
@@ -129,6 +131,7 @@ class _FourierMultiBandAnalyzer2D:
             band_flat_mask[nonzero_flat_idx[in_band]] = True
             band_mask = band_flat_mask.reshape(self._k_mag.shape)
             self._band_masks.append(band_mask)
+            self._band_counts.append(int(np.count_nonzero(band_mask)))
             if np.any(in_band):
                 self.band_centers.append(float(np.mean(nonzero_k[in_band])))
             else:
@@ -147,6 +150,28 @@ class _FourierMultiBandAnalyzer2D:
         if total <= 0.0:
             return np.zeros_like(energies)
         return energies / total
+
+    def coeff_mse_map(self, pred_fields: np.ndarray, true_fields: np.ndarray) -> np.ndarray:
+        pred = _as_batch(pred_fields)
+        true = _as_batch(true_fields)
+        if pred.shape != true.shape:
+            raise ValueError(
+                f"Expected pred/true shapes to match for coefficient MSE, got {pred.shape} vs {true.shape}"
+            )
+        diff = fft2(pred, axes=(-2, -1)) - fft2(true, axes=(-2, -1))
+        return np.mean(np.abs(diff) ** 2, axis=0)
+
+    def band_means_from_map(self, value_map: np.ndarray) -> np.ndarray:
+        values = np.asarray(value_map, dtype=np.float64)
+        if values.shape != self._k_mag.shape:
+            raise ValueError(f"Expected value map shape {self._k_mag.shape}, got {values.shape}")
+        means: List[float] = []
+        for mask, count in zip(self._band_masks, self._band_counts):
+            if count <= 0:
+                means.append(float("nan"))
+            else:
+                means.append(float(np.mean(values[mask])))
+        return np.asarray(means, dtype=np.float64)
 
 
 def _max_haar_levels(nx: int, ny: int) -> int:
@@ -218,6 +243,15 @@ def _build_wavelet_scores(nx: int, ny: int, max_levels: int) -> np.ndarray:
     return scores
 
 
+def _build_periodic_laplace_scale(nx: int, ny: int, dx: float, dy: float) -> np.ndarray:
+    """Periodic discrete-Laplacian eigenvalue scale for FFT-indexed modes."""
+    mode_x = np.arange(nx, dtype=np.float64)
+    mode_y = np.arange(ny, dtype=np.float64)
+    lambda_x = (2.0 - 2.0 * np.cos(2.0 * np.pi * mode_x / nx)) / (dx * dx)
+    lambda_y = (2.0 - 2.0 * np.cos(2.0 * np.pi * mode_y / ny)) / (dy * dy)
+    return np.sqrt(lambda_x[:, None] + lambda_y[None, :])
+
+
 class _BasisProjector2D:
     """Residual basis projection and HF/LF band accounting."""
 
@@ -238,6 +272,12 @@ class _BasisProjector2D:
         self.ny = int(ny)
         self.omega_1_frac = float(omega_1_frac)
         self.omega_2_frac = float(omega_2_frac)
+        self._wavelet_levels = 0
+        self._wavelet_scores = None
+        self._wavelet_use_fourier_fallback = False
+        self._svd_scores = None
+        self._svd_bin_edges = None
+        self._svd_k_mag = None
 
         if self.basis == "fourier":
             k_low = max(1.0, fourier_k_max * self.omega_1_frac)
@@ -245,15 +285,8 @@ class _BasisProjector2D:
             self._low_mask = (fourier_k_mag >= 1.0) & (fourier_k_mag <= k_low)
             self._high_mask = (fourier_k_mag > k_high) & (fourier_k_mag <= fourier_k_max)
             self._total_mask = (fourier_k_mag >= 1.0) & (fourier_k_mag <= fourier_k_max)
-            self._wavelet_levels = 0
-            self._wavelet_scores = None
-            self._svd_scores = None
         elif self.basis == "laplace":
-            mode_x = np.arange(self.nx, dtype=np.float64)
-            mode_y = np.arange(self.ny, dtype=np.float64)
-            lambda_x = (2.0 - 2.0 * np.cos(np.pi * mode_x / self.nx)) / (dx * dx)
-            lambda_y = (2.0 - 2.0 * np.cos(np.pi * mode_y / self.ny)) / (dy * dy)
-            laplace_scale = np.sqrt(lambda_x[:, None] + lambda_y[None, :])
+            laplace_scale = _build_periodic_laplace_scale(self.nx, self.ny, dx, dy)
 
             positive = laplace_scale > 0.0
             nonzero = laplace_scale[positive]
@@ -264,37 +297,49 @@ class _BasisProjector2D:
             self._low_mask = positive & (laplace_scale <= low_cut)
             self._high_mask = positive & (laplace_scale > high_cut)
             self._total_mask = positive
-            self._wavelet_levels = 0
-            self._wavelet_scores = None
-            self._svd_scores = None
         elif self.basis == "wavelet":
             levels = _max_haar_levels(self.nx, self.ny)
-            scores = _build_wavelet_scores(self.nx, self.ny, levels)
-            positive = scores > 0.0
-            nonzero = scores[positive]
-            score_max = float(np.max(nonzero)) if nonzero.size else 1.0
-            low_cut = max(float(np.min(nonzero)) if nonzero.size else 0.0, score_max * self.omega_1_frac)
-            high_cut = score_max * self.omega_2_frac
+            if levels <= 0:
+                # Guardrail: odd/non-decomposable grids cannot form a meaningful Haar hierarchy.
+                # Fall back to Fourier-style frequency accounting rather than silently producing
+                # degenerate HF/LF masks.
+                k_low = max(1.0, fourier_k_max * self.omega_1_frac)
+                k_high = fourier_k_max * self.omega_2_frac
+                self._low_mask = (fourier_k_mag >= 1.0) & (fourier_k_mag <= k_low)
+                self._high_mask = (fourier_k_mag > k_high) & (fourier_k_mag <= fourier_k_max)
+                self._total_mask = (fourier_k_mag >= 1.0) & (fourier_k_mag <= fourier_k_max)
+                self._wavelet_use_fourier_fallback = True
+            else:
+                scores = _build_wavelet_scores(self.nx, self.ny, levels)
+                positive = scores > 0.0
+                nonzero = scores[positive]
+                score_max = float(np.max(nonzero)) if nonzero.size else 1.0
+                low_cut = max(float(np.min(nonzero)) if nonzero.size else 0.0, score_max * self.omega_1_frac)
+                high_cut = score_max * self.omega_2_frac
 
-            self._low_mask = positive & (scores <= low_cut)
-            self._high_mask = positive & (scores > high_cut)
-            self._total_mask = positive
-            self._wavelet_levels = levels
-            self._wavelet_scores = scores
-            self._svd_scores = None
+                self._low_mask = positive & (scores <= low_cut)
+                self._high_mask = positive & (scores > high_cut)
+                self._total_mask = positive
+                if not np.any(self._low_mask):
+                    self._low_mask = positive & (scores == float(np.min(nonzero)))
+                if not np.any(self._high_mask):
+                    self._high_mask = positive & (scores == float(np.max(nonzero)))
+                self._wavelet_levels = levels
+                self._wavelet_scores = scores
         elif self.basis == "svd":
             rank = min(self.nx, self.ny)
-            scores = np.arange(1, rank + 1, dtype=np.float64)
-            score_max = float(rank)
-            low_cut = max(1.0, score_max * self.omega_1_frac)
-            high_cut = score_max * self.omega_2_frac
+            k_max_observed = float(np.max(fourier_k_mag))
+            bin_edges = np.linspace(0.0, k_max_observed, rank + 1, dtype=np.float64)
+            bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+            k_low = max(1.0, fourier_k_max * self.omega_1_frac)
+            k_high = fourier_k_max * self.omega_2_frac
 
-            self._low_mask = scores <= low_cut
-            self._high_mask = scores > high_cut
-            self._total_mask = scores > 0.0
-            self._wavelet_levels = 0
-            self._wavelet_scores = None
-            self._svd_scores = scores
+            self._low_mask = (bin_centers >= 1.0) & (bin_centers <= k_low)
+            self._high_mask = bin_centers > k_high
+            self._total_mask = bin_centers >= 1.0
+            self._svd_scores = bin_centers
+            self._svd_bin_edges = bin_edges
+            self._svd_k_mag = np.asarray(fourier_k_mag, dtype=np.float64)
         else:
             raise RuntimeError(f"Unhandled basis '{self.basis}'")
 
@@ -305,10 +350,11 @@ class _BasisProjector2D:
             return np.mean(np.abs(fft2(samples, axes=(-2, -1))) ** 2, axis=0)
 
         if self.basis == "laplace":
-            coeff = dctn(samples, type=2, norm="ortho", axes=(-2, -1))
-            return np.mean(np.abs(coeff) ** 2, axis=0)
+            return np.mean(np.abs(fft2(samples, axes=(-2, -1))) ** 2, axis=0)
 
         if self.basis == "wavelet":
+            if self._wavelet_use_fourier_fallback:
+                return np.mean(np.abs(fft2(samples, axes=(-2, -1))) ** 2, axis=0)
             power = np.zeros((self.nx, self.ny), dtype=np.float64)
             for sample in samples:
                 coeff = _haar2d_coefficients(sample, self._wavelet_levels)
@@ -320,8 +366,20 @@ class _BasisProjector2D:
             rank = int(self._svd_scores.size)
             power = np.zeros(rank, dtype=np.float64)
             for sample in samples:
-                singular_values = np.linalg.svd(sample, full_matrices=False, compute_uv=False)
-                power += singular_values * singular_values
+                u, singular_values, vh = np.linalg.svd(sample, full_matrices=False, compute_uv=True)
+                for idx in range(rank):
+                    sigma = float(singular_values[idx])
+                    if sigma <= 0.0:
+                        continue
+                    mode = np.outer(u[:, idx], vh[idx, :])
+                    mode_power = np.abs(fft2(mode)) ** 2
+                    mode_total = float(np.sum(mode_power))
+                    if mode_total <= 0.0:
+                        continue
+                    k_mean = float(np.sum(self._svd_k_mag * mode_power) / mode_total)
+                    bin_idx = int(np.searchsorted(self._svd_bin_edges, k_mean, side="right") - 1)
+                    bin_idx = int(np.clip(bin_idx, 0, rank - 1))
+                    power[bin_idx] += sigma * sigma
             power /= max(samples.shape[0], 1)
             return power
 
@@ -431,12 +489,22 @@ class NavierStokesRSDAnalyzer:
         true_power = self.spectral_bands.power_map(omega_true)
         pred_frac = self.spectral_bands.band_fractions_from_power(pred_power)
         true_frac = self.spectral_bands.band_fractions_from_power(true_power)
-        spectral_band_error = np.abs(pred_frac - true_frac)
-        low_group, mid_group, high_group = _split_three_groups(spectral_band_error)
-        spectral_low_error = float(np.nanmean(low_group))
-        spectral_mid_error = float(np.nanmean(mid_group))
-        spectral_high_error = float(np.nanmean(high_group))
-        spectral_multiband_error = float(np.mean(spectral_band_error))
+        spectral_band_error_vs_clean_gt = np.abs(pred_frac - true_frac)
+        low_group, mid_group, high_group = _split_three_groups(spectral_band_error_vs_clean_gt)
+        spectral_low_error_vs_clean_gt = float(np.nanmean(low_group))
+        spectral_mid_error_vs_clean_gt = float(np.nanmean(mid_group))
+        spectral_high_error_vs_clean_gt = float(np.nanmean(high_group))
+        spectral_multiband_error_vs_clean_gt = float(np.nanmean(spectral_band_error_vs_clean_gt))
+
+        coeff_mse_map = self.spectral_bands.coeff_mse_map(omega_pred, omega_true)
+        fourier_coeff_mse_band_vs_clean_gt = self.spectral_bands.band_means_from_map(coeff_mse_map)
+        coeff_low_group, coeff_mid_group, coeff_high_group = _split_three_groups(
+            fourier_coeff_mse_band_vs_clean_gt
+        )
+        fourier_coeff_mse_low_vs_clean_gt = float(np.nanmean(coeff_low_group))
+        fourier_coeff_mse_mid_vs_clean_gt = float(np.nanmean(coeff_mid_group))
+        fourier_coeff_mse_high_vs_clean_gt = float(np.nanmean(coeff_high_group))
+        fourier_coeff_mse_multiband_vs_clean_gt = float(np.nanmean(fourier_coeff_mse_band_vs_clean_gt))
 
         return {
             "l2_error": l2_error,
@@ -445,11 +513,21 @@ class NavierStokesRSDAnalyzer:
             "residual_mag": residual_mag,
             "pde_residual_st_rms": pde_residual_st_rms,
             "boundary_error": boundary_error,
-            "spectral_multiband_error": spectral_multiband_error,
-            "spectral_low_error": spectral_low_error,
-            "spectral_mid_error": spectral_mid_error,
-            "spectral_high_error": spectral_high_error,
-            "spectral_band_error": spectral_band_error.astype(float).tolist(),
+            "spectral_multiband_error": spectral_multiband_error_vs_clean_gt,
+            "spectral_low_error": spectral_low_error_vs_clean_gt,
+            "spectral_mid_error": spectral_mid_error_vs_clean_gt,
+            "spectral_high_error": spectral_high_error_vs_clean_gt,
+            "spectral_band_error": spectral_band_error_vs_clean_gt.astype(float).tolist(),
+            "spectral_multiband_error_vs_clean_gt": spectral_multiband_error_vs_clean_gt,
+            "spectral_low_error_vs_clean_gt": spectral_low_error_vs_clean_gt,
+            "spectral_mid_error_vs_clean_gt": spectral_mid_error_vs_clean_gt,
+            "spectral_high_error_vs_clean_gt": spectral_high_error_vs_clean_gt,
+            "spectral_band_error_vs_clean_gt": spectral_band_error_vs_clean_gt.astype(float).tolist(),
+            "fourier_coeff_mse_multiband_vs_clean_gt": fourier_coeff_mse_multiband_vs_clean_gt,
+            "fourier_coeff_mse_low_vs_clean_gt": fourier_coeff_mse_low_vs_clean_gt,
+            "fourier_coeff_mse_mid_vs_clean_gt": fourier_coeff_mse_mid_vs_clean_gt,
+            "fourier_coeff_mse_high_vs_clean_gt": fourier_coeff_mse_high_vs_clean_gt,
+            "fourier_coeff_mse_band_vs_clean_gt": fourier_coeff_mse_band_vs_clean_gt.astype(float).tolist(),
         }
 
 
@@ -569,12 +647,24 @@ class ReactionDiffusionRSDAnalyzer:
         true_power = self.spectral_bands.power_map(u_true) + self.spectral_bands.power_map(v_true)
         pred_frac = self.spectral_bands.band_fractions_from_power(pred_power)
         true_frac = self.spectral_bands.band_fractions_from_power(true_power)
-        spectral_band_error = np.abs(pred_frac - true_frac)
-        low_group, mid_group, high_group = _split_three_groups(spectral_band_error)
-        spectral_low_error = float(np.nanmean(low_group))
-        spectral_mid_error = float(np.nanmean(mid_group))
-        spectral_high_error = float(np.nanmean(high_group))
-        spectral_multiband_error = float(np.mean(spectral_band_error))
+        spectral_band_error_vs_clean_gt = np.abs(pred_frac - true_frac)
+        low_group, mid_group, high_group = _split_three_groups(spectral_band_error_vs_clean_gt)
+        spectral_low_error_vs_clean_gt = float(np.nanmean(low_group))
+        spectral_mid_error_vs_clean_gt = float(np.nanmean(mid_group))
+        spectral_high_error_vs_clean_gt = float(np.nanmean(high_group))
+        spectral_multiband_error_vs_clean_gt = float(np.nanmean(spectral_band_error_vs_clean_gt))
+
+        coeff_mse_map_u = self.spectral_bands.coeff_mse_map(u_pred, u_true)
+        coeff_mse_map_v = self.spectral_bands.coeff_mse_map(v_pred, v_true)
+        coeff_mse_map = 0.5 * (coeff_mse_map_u + coeff_mse_map_v)
+        fourier_coeff_mse_band_vs_clean_gt = self.spectral_bands.band_means_from_map(coeff_mse_map)
+        coeff_low_group, coeff_mid_group, coeff_high_group = _split_three_groups(
+            fourier_coeff_mse_band_vs_clean_gt
+        )
+        fourier_coeff_mse_low_vs_clean_gt = float(np.nanmean(coeff_low_group))
+        fourier_coeff_mse_mid_vs_clean_gt = float(np.nanmean(coeff_mid_group))
+        fourier_coeff_mse_high_vs_clean_gt = float(np.nanmean(coeff_high_group))
+        fourier_coeff_mse_multiband_vs_clean_gt = float(np.nanmean(fourier_coeff_mse_band_vs_clean_gt))
 
         return {
             "l2_error": l2,
@@ -586,9 +676,19 @@ class ReactionDiffusionRSDAnalyzer:
             "pde_residual_st_rms_u": pde_residual_st_rms_u,
             "pde_residual_st_rms_v": pde_residual_st_rms_v,
             "boundary_error": boundary_error,
-            "spectral_multiband_error": spectral_multiband_error,
-            "spectral_low_error": spectral_low_error,
-            "spectral_mid_error": spectral_mid_error,
-            "spectral_high_error": spectral_high_error,
-            "spectral_band_error": spectral_band_error.astype(float).tolist(),
+            "spectral_multiband_error": spectral_multiband_error_vs_clean_gt,
+            "spectral_low_error": spectral_low_error_vs_clean_gt,
+            "spectral_mid_error": spectral_mid_error_vs_clean_gt,
+            "spectral_high_error": spectral_high_error_vs_clean_gt,
+            "spectral_band_error": spectral_band_error_vs_clean_gt.astype(float).tolist(),
+            "spectral_multiband_error_vs_clean_gt": spectral_multiband_error_vs_clean_gt,
+            "spectral_low_error_vs_clean_gt": spectral_low_error_vs_clean_gt,
+            "spectral_mid_error_vs_clean_gt": spectral_mid_error_vs_clean_gt,
+            "spectral_high_error_vs_clean_gt": spectral_high_error_vs_clean_gt,
+            "spectral_band_error_vs_clean_gt": spectral_band_error_vs_clean_gt.astype(float).tolist(),
+            "fourier_coeff_mse_multiband_vs_clean_gt": fourier_coeff_mse_multiband_vs_clean_gt,
+            "fourier_coeff_mse_low_vs_clean_gt": fourier_coeff_mse_low_vs_clean_gt,
+            "fourier_coeff_mse_mid_vs_clean_gt": fourier_coeff_mse_mid_vs_clean_gt,
+            "fourier_coeff_mse_high_vs_clean_gt": fourier_coeff_mse_high_vs_clean_gt,
+            "fourier_coeff_mse_band_vs_clean_gt": fourier_coeff_mse_band_vs_clean_gt.astype(float).tolist(),
         }
