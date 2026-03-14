@@ -13,6 +13,7 @@ from utils.progress import progress_range
 from utils.torch_runtime import (
     build_adam_optimizer,
     build_grad_scaler,
+    clone_state_dict,
     configure_torch_backend,
     move_optimizer_state_to_device,
     resolve_torch_device,
@@ -121,7 +122,7 @@ class ConvolutionalSurrogate2D:
         )
         best_val_loss = float("inf")
         epochs_without_improvement = 0
-        best_state: Dict[str, torch.Tensor] | None = None
+        best_state: Dict[str, Any] | None = None
 
         use_rollout = rollout_w > 0.0 and horizon > 1 and trajectory is not None and len(trajectory) > 0
         if use_rollout:
@@ -210,17 +211,9 @@ class ConvolutionalSurrogate2D:
             )
             best_model_state = resume_state.get("best_model_state")
             if isinstance(best_model_state, dict):
-                best_state = {
-                    key: value.detach().cpu().clone()
-                    if isinstance(value, torch.Tensor)
-                    else torch.as_tensor(value).detach().cpu().clone()
-                    for key, value in best_model_state.items()
-                }
+                best_state = clone_state_dict(best_model_state)
             elif np.isfinite(best_val_loss):
-                best_state = {
-                    key: value.detach().cpu().clone()
-                    for key, value in self.net.state_dict().items()
-                }
+                best_state = clone_state_dict(self.net.state_dict())
             start_epoch = max(1, int(resume_state.get("epoch", 0)) + 1)
 
         def _capture_training_state(epoch_idx: int, val_loss_value: float) -> Dict[str, Any]:
@@ -233,10 +226,7 @@ class ConvolutionalSurrogate2D:
             return {
                 "epoch": int(epoch_idx),
                 "val_loss": float(val_loss_value) if np.isfinite(val_loss_value) else float("nan"),
-                "model_state": {
-                    key: value.detach().cpu().clone()
-                    for key, value in self.net.state_dict().items()
-                },
+                "model_state": clone_state_dict(self.net.state_dict()),
                 "optimizer_state": optimizer.state_dict(),
                 "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
                 "grad_scaler_state": self.grad_scaler.state_dict() if self.grad_scaler is not None else None,
@@ -248,14 +238,7 @@ class ConvolutionalSurrogate2D:
                 },
                 "best_val_loss": float(best_val_loss) if np.isfinite(best_val_loss) else float("inf"),
                 "epochs_without_improvement": int(epochs_without_improvement),
-                "best_model_state": (
-                    {
-                        key: value.detach().cpu().clone()
-                        for key, value in best_state.items()
-                    }
-                    if best_state is not None
-                    else None
-                ),
+                "best_model_state": clone_state_dict(best_state) if best_state is not None else None,
                 "loss_name": str(self.loss_name),
             }
 
@@ -356,10 +339,7 @@ class ConvolutionalSurrogate2D:
             if patience is not None and has_val:
                 if np.isfinite(val_loss_value) and float(val_loss_value) < (best_val_loss - 1e-12):
                     best_val_loss = float(val_loss_value)
-                    best_state = {
-                        key: value.detach().cpu().clone()
-                        for key, value in self.net.state_dict().items()
-                    }
+                    best_state = clone_state_dict(self.net.state_dict())
                     epochs_without_improvement = 0
                 else:
                     epochs_without_improvement += 1

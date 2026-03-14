@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 from contextlib import nullcontext
-from typing import Any, Iterable
+from typing import Any, Dict, Iterable, Mapping
 
 import torch
 
@@ -107,6 +108,29 @@ def move_optimizer_state_to_device(
             continue
         for key, value in list(param_state.items()):
             param_state[key] = _move(value)
+
+
+def clone_state_value(value: Any) -> Any:
+    """Clone model/checkpoint state values safely across tensor and non-tensor types."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().clone()
+    if isinstance(value, dict):
+        return {key: clone_state_value(sub_value) for key, sub_value in value.items()}
+    if isinstance(value, list):
+        return [clone_state_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(clone_state_value(item) for item in value)
+    if isinstance(value, set):
+        return {clone_state_value(item) for item in value}
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        return value
+
+
+def clone_state_dict(state_dict: Mapping[str, Any]) -> Dict[str, Any]:
+    """Clone a state_dict-like mapping and move tensors to detached CPU copies."""
+    return {key: clone_state_value(value) for key, value in state_dict.items()}
 
 
 def build_grad_scaler(device: torch.device) -> torch.cuda.amp.GradScaler | None:
