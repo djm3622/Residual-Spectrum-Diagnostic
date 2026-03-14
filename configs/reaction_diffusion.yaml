@@ -64,7 +64,7 @@ training:
   one_cycle_div_factor: 25.0
   one_cycle_final_div_factor: 10000.0
   checkpoint_every_epochs: 20
-  early_stopping_patience: 20
+  early_stopping_patience: 300
   n_iter: 300
   batch_size: 32
   grad_clip: 1.0
