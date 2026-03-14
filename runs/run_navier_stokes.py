@@ -26,12 +26,12 @@ from data.navier_stokes.external import (
     external_data_config_from_yaml,
     load_navier_stokes_trajectory_data,
 )
-from evaluatin.metrics import build_metric_vs_l2 as _build_metric_vs_l2
-from evaluatin.metrics import build_paired_bootstrap_gap as _build_paired_bootstrap_gap
-from evaluatin.metrics import safe_mean as _safe_mean
-from evaluatin.navier_stokes import block_future_step_indices as _block_future_step_indices
-from evaluatin.navier_stokes import extract_panel_frames as _extract_panel_frames
-from evaluatin.navier_stokes import future_block_rel_l2 as _future_block_rel_l2
+from eval.metrics import build_metric_vs_l2 as _build_metric_vs_l2
+from eval.metrics import build_paired_bootstrap_gap as _build_paired_bootstrap_gap
+from eval.metrics import safe_mean as _safe_mean
+from eval.navier_stokes import block_future_step_indices as _block_future_step_indices
+from eval.navier_stokes import extract_panel_frames as _extract_panel_frames
+from eval.navier_stokes import future_block_rel_l2 as _future_block_rel_l2
 from models.navier_stokes import LOSS_CHOICES, build_model, normalize_loss_name, rollout_2d
 from runs.helpers.common import load_best_checkpoint_for_eval as _load_best_checkpoint_for_eval
 from runs.helpers.common import move_model_device as _move_model_device

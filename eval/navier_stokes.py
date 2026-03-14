@@ -6,7 +6,7 @@ from typing import List
 
 import numpy as np
 
-from evaluatin.metrics import safe_mean
+from eval.metrics import safe_mean
 
 
 def block_future_step_indices(

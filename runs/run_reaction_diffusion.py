@@ -26,11 +26,11 @@ from data.reaction_diffusion.external import (
     normalize_external_source,
     pdebench_source_config_from_yaml,
 )
-from evaluatin.metrics import build_metric_vs_l2 as _build_metric_vs_l2
-from evaluatin.metrics import build_paired_bootstrap_gap as _build_paired_bootstrap_gap
-from evaluatin.metrics import safe_mean as _safe_mean
-from evaluatin.reaction_diffusion import extract_panel_frames as _extract_panel_frames
-from evaluatin.reaction_diffusion import extract_target_frame as _extract_target_frame
+from eval.metrics import build_metric_vs_l2 as _build_metric_vs_l2
+from eval.metrics import build_paired_bootstrap_gap as _build_paired_bootstrap_gap
+from eval.metrics import safe_mean as _safe_mean
+from eval.reaction_diffusion import extract_panel_frames as _extract_panel_frames
+from eval.reaction_diffusion import extract_target_frame as _extract_target_frame
 from models.reaction_diffusion import LOSS_CHOICES, build_model, normalize_loss_name, rollout_coupled
 from runs.helpers.common import load_best_checkpoint_for_eval as _load_best_checkpoint_for_eval
 from runs.helpers.common import move_model_device as _move_model_device
