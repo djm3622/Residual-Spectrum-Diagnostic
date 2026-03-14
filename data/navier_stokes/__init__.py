@@ -2,6 +2,7 @@
 
 from .external import (
     ExternalNavierStokesDataConfig,
+    FNOMATSourceConfig,
     NavierStokesTrajectoryData,
     NeuralOperatorSourceConfig,
     PDEBenchSourceConfig,
@@ -15,6 +16,7 @@ __all__ = [
     "NavierStokes2D",
     "NeuralOperatorSourceConfig",
     "PDEBenchSourceConfig",
+    "FNOMATSourceConfig",
     "ExternalNavierStokesDataConfig",
     "NavierStokesTrajectoryData",
     "external_data_config_from_yaml",

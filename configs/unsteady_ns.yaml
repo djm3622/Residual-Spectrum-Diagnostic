@@ -1,0 +1,201 @@
+experiment:
+  name: unsteady_ns
+grid:
+  nx: 64
+  ny: 64
+  Lx: 1.0
+  Ly: 1.0
+physics:
+  nu: 0.001
+  forcing:
+    type: none
+    amplitude: 0.0
+    kx: 1
+    ky: 2
+    omega: 0.5
+    phase: 0.0
+time:
+  t_final: 1.0
+  n_snapshots: 50
+  dt_max: 0.001
+data:
+  n_train_trajectories: 4500
+  n_test_trajectories: 500
+  initial_condition: line_wave
+  initial_n_modes: 1
+  initial_kmax: 1
+  initial_target_rms: 0.0
+  line_axis: diagonal_pos
+  line_amplitude: 0.05
+  external:
+    source: fno_mat
+    neuraloperator:
+      data_path: external_data/neuraloperator
+      train_resolution: 64
+      test_resolution: 64
+      n_train: 0
+      n_test: 0
+      batch_size: 32
+      test_batch_size: 32
+      positional_encoding: true
+      encode_input: false
+      encode_output: false
+      channel_dim: 1
+      channel_index: 0
+      dt: null
+    pdebench:
+      file_path: external_data/pdebench/2D/NS_incom/ns_incom_inhom_2d_64_omega.h5
+      file_paths: []
+      dataset_key: omega
+      layout: NTHW
+      channel_index: 0
+      time_stride: 1
+      spatial_stride: 1
+      n_train: 0
+      n_test: 0
+      shuffle: true
+      split_seed_offset: 1207
+      dt: null
+    fno_mat:
+      file_path: external_data/fno/NavierStokes_V1e-3_N5000_T50.mat
+      dataset_key: u
+      time_key: t
+      layout: AUTO
+      time_stride: 1
+      spatial_stride: 1
+      n_train: 4500
+      n_test: 500
+      shuffle: true
+      split_seed_offset: 1207
+      dt: null
+training:
+  device: cuda
+  loss: l2
+  noise_level: 0.04
+  lr: 0.001
+  weight_decay: 0.0001
+  use_one_cycle_lr: true
+  one_cycle_pct_start: 0.3
+  one_cycle_div_factor: 25.0
+  one_cycle_final_div_factor: 10000.0
+  checkpoint_every_epochs: 20
+  early_stopping_patience: -1
+  n_iter: 100
+  batch_size: 32
+  grad_clip: 1.0
+  rollout_horizon: 10
+  rollout_weight: 0.8
+  validation_fraction: 0.1
+  model_width: 32
+  model_depth: 5
+  neural_operator:
+    common:
+      n_modes:
+      - 20
+      - 20
+      hidden_channels: 48
+      n_layers: 6
+      lifting_channel_ratio: 2.0
+      projection_channel_ratio: 2.0
+      use_channel_mlp: true
+      channel_mlp_expansion: 0.75
+      channel_mlp_dropout: 0.25
+      fno_skip: linear
+      channel_mlp_skip: soft-gating
+      norm: group_norm
+      domain_padding: 0.0
+      implementation: factorized
+      separable: false
+      rank: 1.0
+    tfno:
+      hidden_channels: 48
+      n_layers: 6
+      factorization: Tucker
+      rank: 0.1
+      temporal:
+        enabled: true
+        input_steps: 10
+        output_steps: 10
+        target_mode: next_block
+        n_modes_time: 6
+    fno:
+      hidden_channels: 32
+      n_layers: 4
+      temporal:
+        enabled: true
+        input_steps: 10
+        output_steps: 10
+        target_mode: next_block
+        n_modes_time: 6
+    uno:
+      hidden_channels: 32
+      n_layers: 4
+      lifting_channels: 192
+      projection_channels: 192
+      channel_mlp_skip: linear
+      uno_out_channels:
+      - 72
+      - 96
+      - 96
+      - 96
+      - 72
+      uno_n_modes:
+      - - 12
+        - 12
+      - - 12
+        - 12
+      - - 12
+        - 12
+      - - 12
+        - 12
+      - - 12
+        - 12
+      uno_scalings:
+      - - 1.0
+        - 1.0
+      - - 0.5
+        - 0.5
+      - - 1.0
+        - 1.0
+      - - 1.0
+        - 1.0
+      - - 2.0
+        - 2.0
+progress:
+  enabled: true
+  data_generation: true
+  training: true
+  evaluation: true
+rsd:
+  basis: fourier
+  omega_1_frac: 0.0625
+  omega_2_frac: 0.1666666667
+  spectral_band_count: 8
+paths:
+  output_dir: output
+  checkpoint_dir: checkpoints
+artifacts:
+  save_figures: true
+  save_fit_visualizations: true
+  save_trajectory_visualizations: true
+  fit_visualization:
+    input:
+      cmap: cividis
+      border_color: '#2A9D8F'
+      border_width: 2.0
+    output:
+      cmap: RdBu_r
+  trajectory_visualization:
+    instance_indices:
+    - 0
+    - 1
+    step_indices:
+    - 0
+    - 10
+    - 20
+    - 30
+    - 40
+    - 49
+  eval_pair_index: 0
+  test_case_index: 0
+  test_step_index: 0

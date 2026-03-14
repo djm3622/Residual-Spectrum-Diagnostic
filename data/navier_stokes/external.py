@@ -63,12 +63,30 @@ class PDEBenchSourceConfig:
 
 
 @dataclass
+class FNOMATSourceConfig:
+    """Settings for loading full-trajectory FNO MAT Navier-Stokes data."""
+
+    file_path: str = "external_data/fno/NavierStokes_V1e-3_N5000_T50.mat"
+    dataset_key: str = "u"
+    time_key: str = "t"
+    layout: str = "AUTO"
+    time_stride: int = 1
+    spatial_stride: int = 1
+    n_train: int = 0
+    n_test: int = 0
+    shuffle: bool = True
+    split_seed_offset: int = 1207
+    dt: float | None = None
+
+
+@dataclass
 class ExternalNavierStokesDataConfig:
     """Top-level external data configuration."""
 
     source: str = "generated"
     neuraloperator: NeuralOperatorSourceConfig = field(default_factory=NeuralOperatorSourceConfig)
     pdebench: PDEBenchSourceConfig = field(default_factory=PDEBenchSourceConfig)
+    fno_mat: FNOMATSourceConfig = field(default_factory=FNOMATSourceConfig)
 
 
 @dataclass
@@ -93,10 +111,13 @@ def external_data_config_from_yaml(raw_config: Mapping[str, Any]) -> ExternalNav
     source = _normalize_source(str(ext_cfg.get("source", "generated")))
     neural_raw = ext_cfg.get("neuraloperator", {})
     pde_raw = ext_cfg.get("pdebench", {})
+    fno_mat_raw = ext_cfg.get("fno_mat", {})
     if not isinstance(neural_raw, Mapping):
         neural_raw = {}
     if not isinstance(pde_raw, Mapping):
         pde_raw = {}
+    if not isinstance(fno_mat_raw, Mapping):
+        fno_mat_raw = {}
 
     neural_cfg = NeuralOperatorSourceConfig(
         data_path=str(neural_raw.get("data_path", "external_data/neuraloperator")),
@@ -127,10 +148,29 @@ def external_data_config_from_yaml(raw_config: Mapping[str, Any]) -> ExternalNav
         split_seed_offset=int(pde_raw.get("split_seed_offset", 1207)),
         dt=_as_optional_float(pde_raw.get("dt")),
     )
+    fno_mat_cfg = FNOMATSourceConfig(
+        file_path=str(
+            fno_mat_raw.get(
+                "file_path",
+                "external_data/fno/NavierStokes_V1e-3_N5000_T50.mat",
+            )
+        ),
+        dataset_key=str(fno_mat_raw.get("dataset_key", "u")),
+        time_key=str(fno_mat_raw.get("time_key", "t")),
+        layout=str(fno_mat_raw.get("layout", "AUTO")),
+        time_stride=max(1, int(fno_mat_raw.get("time_stride", 1))),
+        spatial_stride=max(1, int(fno_mat_raw.get("spatial_stride", 1))),
+        n_train=int(fno_mat_raw.get("n_train", 0)),
+        n_test=int(fno_mat_raw.get("n_test", 0)),
+        shuffle=bool(fno_mat_raw.get("shuffle", True)),
+        split_seed_offset=int(fno_mat_raw.get("split_seed_offset", 1207)),
+        dt=_as_optional_float(fno_mat_raw.get("dt")),
+    )
     return ExternalNavierStokesDataConfig(
         source=source,
         neuraloperator=neural_cfg,
         pdebench=pde_cfg,
+        fno_mat=fno_mat_cfg,
     )
 
 
@@ -149,6 +189,8 @@ def load_navier_stokes_trajectory_data(
         train, test, dt, metadata = _load_neuraloperator(config, external_cfg.neuraloperator, seed, show_data_progress)
     elif source == "pdebench":
         train, test, dt, metadata = _load_pdebench(config, external_cfg.pdebench, seed)
+    elif source == "fno_mat":
+        train, test, dt, metadata = _load_fno_mat(config, external_cfg.fno_mat, seed)
     else:
         raise ValueError(f"Unsupported data.external.source '{external_cfg.source}'.")
 
@@ -440,3 +482,486 @@ def _load_pdebench(
         "n_test_loaded": len(test_trajectories),
     }
     return train_trajectories, test_trajectories, dt, metadata
+
+
+def _load_fno_mat(
+    config: NSConfig,
+    source_cfg: FNOMATSourceConfig,
+    seed: int,
+) -> Tuple[List[np.ndarray], List[np.ndarray], float, Dict[str, Any]]:
+    dataset_path = Path(source_cfg.file_path).expanduser()
+    if not dataset_path.exists():
+        raise FileNotFoundError(
+            f"FNO MAT file not found: {dataset_path}. "
+            "Set data.external.fno_mat.file_path to a local MAT file."
+        )
+    if not dataset_path.is_file():
+        raise FileNotFoundError(f"FNO MAT path is not a file: {dataset_path}")
+
+    requested_train = int(source_cfg.n_train) if int(source_cfg.n_train) > 0 else int(config.n_train_trajectories)
+    requested_test = int(source_cfg.n_test) if int(source_cfg.n_test) > 0 else int(config.n_test_trajectories)
+    if requested_train <= 0 or requested_test <= 0:
+        raise ValueError(
+            f"Resolved split counts must be positive (train={requested_train}, test={requested_test})."
+        )
+
+    h5_error: Exception | None = None
+    try:
+        train_trajectories, test_trajectories, dt_from_file, metadata = _load_fno_mat_h5(
+            dataset_path,
+            source_cfg,
+            requested_train=requested_train,
+            requested_test=requested_test,
+            seed=seed,
+            target_nx=int(config.nx),
+            target_ny=int(config.ny),
+        )
+    except (OSError, ImportError) as exc:
+        h5_error = exc
+        train_trajectories, test_trajectories, dt_from_file, metadata = _load_fno_mat_scipy(
+            dataset_path,
+            source_cfg,
+            requested_train=requested_train,
+            requested_test=requested_test,
+            seed=seed,
+            target_nx=int(config.nx),
+            target_ny=int(config.ny),
+        )
+        metadata["h5py_open_error"] = str(h5_error)
+
+    dt_fallback = float(config.t_final / max(config.n_snapshots - 1, 1))
+    if source_cfg.dt is not None:
+        dt = float(source_cfg.dt) * float(source_cfg.time_stride)
+    elif dt_from_file is not None:
+        dt = float(dt_from_file)
+    else:
+        dt = dt_fallback
+
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError(f"Resolved non-positive dt ({dt}) for FNO MAT source.")
+    return train_trajectories, test_trajectories, float(dt), metadata
+
+
+def _load_fno_mat_h5(
+    dataset_path: Path,
+    source_cfg: FNOMATSourceConfig,
+    requested_train: int,
+    requested_test: int,
+    seed: int,
+    target_nx: int,
+    target_ny: int,
+) -> Tuple[List[np.ndarray], List[np.ndarray], float | None, Dict[str, Any]]:
+    try:
+        import h5py
+    except Exception as exc:
+        raise ImportError(
+            "FNO MAT HDF5 loading requires `h5py`. Install it with: python3 -m pip install h5py"
+        ) from exc
+
+    dataset_key = str(source_cfg.dataset_key).strip() or "u"
+    time_key = str(source_cfg.time_key).strip() or "t"
+    time_stride = max(1, int(source_cfg.time_stride))
+    spatial_stride = max(1, int(source_cfg.spatial_stride))
+    requested_total = requested_train + requested_test
+
+    with h5py.File(dataset_path, "r") as handle:
+        keys = list(handle.keys())
+        if dataset_key not in handle:
+            raise KeyError(
+                f"Dataset key '{dataset_key}' not found in {dataset_path}. Available keys: {keys}"
+            )
+
+        u_ds = handle[dataset_key]
+        if not isinstance(u_ds, h5py.Dataset):
+            raise ValueError(f"MAT key '{dataset_key}' in {dataset_path} is not a dataset.")
+        if u_ds.ndim != 4:
+            raise ValueError(
+                f"FNO MAT dataset '{dataset_key}' must have rank 4, got shape {tuple(u_ds.shape)}."
+            )
+
+        time_values = handle[time_key] if time_key in handle else None
+        time_length_hint = _extract_time_length_hint(time_values)
+        resolved_layout = _resolve_fno_mat_layout(
+            tuple(int(dim) for dim in u_ds.shape),
+            source_cfg.layout,
+            time_length_hint=time_length_hint,
+        )
+        axis_map = {label: idx for idx, label in enumerate(resolved_layout)}
+        n_available = int(u_ds.shape[axis_map["N"]])
+        if n_available < requested_total:
+            raise ValueError(
+                f"FNO MAT file provides {n_available} samples but "
+                f"{requested_total} are required (train={requested_train}, test={requested_test})."
+            )
+
+        train_idx, test_idx = _split_sample_indices(
+            n_available=n_available,
+            requested_train=requested_train,
+            requested_test=requested_test,
+            shuffle=bool(source_cfg.shuffle),
+            seed=seed,
+            split_seed_offset=int(source_cfg.split_seed_offset),
+        )
+
+        train_trajectories = [
+            _extract_fno_mat_trajectory(
+                u_ds,
+                layout=resolved_layout,
+                sample_index=int(idx),
+                time_stride=time_stride,
+                spatial_stride=spatial_stride,
+                target_nx=target_nx,
+                target_ny=target_ny,
+            )
+            for idx in train_idx
+        ]
+        test_trajectories = [
+            _extract_fno_mat_trajectory(
+                u_ds,
+                layout=resolved_layout,
+                sample_index=int(idx),
+                time_stride=time_stride,
+                spatial_stride=spatial_stride,
+                target_nx=target_nx,
+                target_ny=target_ny,
+            )
+            for idx in test_idx
+        ]
+
+        n_steps_raw = int(u_ds.shape[axis_map["T"]])
+        dt_from_file = _infer_dt_from_mat_time(
+            time_values,
+            n_steps_raw=n_steps_raw,
+            time_stride=time_stride,
+        )
+
+        metadata = {
+            "dataset": "fno_mat",
+            "file_path": str(dataset_path.resolve()),
+            "dataset_key": dataset_key,
+            "time_key": time_key if time_key else None,
+            "layout": resolved_layout,
+            "raw_shape": tuple(int(dim) for dim in u_ds.shape),
+            "time_stride": int(time_stride),
+            "spatial_stride": int(spatial_stride),
+            "n_total_available": int(n_available),
+            "n_train_loaded": len(train_trajectories),
+            "n_test_loaded": len(test_trajectories),
+            "backend": "h5py",
+        }
+
+    return train_trajectories, test_trajectories, dt_from_file, metadata
+
+
+def _load_fno_mat_scipy(
+    dataset_path: Path,
+    source_cfg: FNOMATSourceConfig,
+    requested_train: int,
+    requested_test: int,
+    seed: int,
+    target_nx: int,
+    target_ny: int,
+) -> Tuple[List[np.ndarray], List[np.ndarray], float | None, Dict[str, Any]]:
+    try:
+        from scipy.io import loadmat
+    except Exception as exc:
+        raise ImportError(
+            "FNO MAT fallback loader requires `scipy`. Install it with: python3 -m pip install scipy"
+        ) from exc
+
+    dataset_key = str(source_cfg.dataset_key).strip() or "u"
+    time_key = str(source_cfg.time_key).strip() or "t"
+    time_stride = max(1, int(source_cfg.time_stride))
+    spatial_stride = max(1, int(source_cfg.spatial_stride))
+    requested_total = requested_train + requested_test
+
+    variable_names = [dataset_key]
+    if time_key and time_key != dataset_key:
+        variable_names.append(time_key)
+    payload = loadmat(dataset_path, variable_names=variable_names)
+    if dataset_key not in payload:
+        keys = sorted(k for k in payload.keys() if not k.startswith("__"))
+        raise KeyError(
+            f"Dataset key '{dataset_key}' not found in {dataset_path}. Available keys: {keys}"
+        )
+
+    u_arr = np.asarray(payload[dataset_key], dtype=np.float32)
+    if u_arr.ndim != 4:
+        raise ValueError(
+            f"FNO MAT array '{dataset_key}' must have rank 4, got shape {tuple(u_arr.shape)}."
+        )
+
+    time_values = payload.get(time_key)
+    time_length_hint = _extract_time_length_hint(time_values)
+    resolved_layout = _resolve_fno_mat_layout(
+        tuple(int(dim) for dim in u_arr.shape),
+        source_cfg.layout,
+        time_length_hint=time_length_hint,
+    )
+    axis_map = {label: idx for idx, label in enumerate(resolved_layout)}
+    n_available = int(u_arr.shape[axis_map["N"]])
+    if n_available < requested_total:
+        raise ValueError(
+            f"FNO MAT file provides {n_available} samples but "
+            f"{requested_total} are required (train={requested_train}, test={requested_test})."
+        )
+
+    train_idx, test_idx = _split_sample_indices(
+        n_available=n_available,
+        requested_train=requested_train,
+        requested_test=requested_test,
+        shuffle=bool(source_cfg.shuffle),
+        seed=seed,
+        split_seed_offset=int(source_cfg.split_seed_offset),
+    )
+
+    train_trajectories = [
+        _extract_fno_mat_trajectory(
+            u_arr,
+            layout=resolved_layout,
+            sample_index=int(idx),
+            time_stride=time_stride,
+            spatial_stride=spatial_stride,
+            target_nx=target_nx,
+            target_ny=target_ny,
+        )
+        for idx in train_idx
+    ]
+    test_trajectories = [
+        _extract_fno_mat_trajectory(
+            u_arr,
+            layout=resolved_layout,
+            sample_index=int(idx),
+            time_stride=time_stride,
+            spatial_stride=spatial_stride,
+            target_nx=target_nx,
+            target_ny=target_ny,
+        )
+        for idx in test_idx
+    ]
+
+    n_steps_raw = int(u_arr.shape[axis_map["T"]])
+    dt_from_file = _infer_dt_from_mat_time(
+        time_values,
+        n_steps_raw=n_steps_raw,
+        time_stride=time_stride,
+    )
+
+    metadata = {
+        "dataset": "fno_mat",
+        "file_path": str(dataset_path.resolve()),
+        "dataset_key": dataset_key,
+        "time_key": time_key if time_key else None,
+        "layout": resolved_layout,
+        "raw_shape": tuple(int(dim) for dim in u_arr.shape),
+        "time_stride": int(time_stride),
+        "spatial_stride": int(spatial_stride),
+        "n_total_available": int(n_available),
+        "n_train_loaded": len(train_trajectories),
+        "n_test_loaded": len(test_trajectories),
+        "backend": "scipy.io.loadmat",
+    }
+    return train_trajectories, test_trajectories, dt_from_file, metadata
+
+
+def _split_sample_indices(
+    n_available: int,
+    requested_train: int,
+    requested_test: int,
+    shuffle: bool,
+    seed: int,
+    split_seed_offset: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    requested_total = int(requested_train) + int(requested_test)
+    if int(n_available) < requested_total:
+        raise ValueError(
+            f"Requested train/test split ({requested_total}) exceeds available samples ({n_available})."
+        )
+
+    indices = np.arange(int(n_available), dtype=int)
+    if bool(shuffle):
+        rng = np.random.default_rng(int(seed) * 1000 + int(split_seed_offset))
+        rng.shuffle(indices)
+    train_idx = indices[: int(requested_train)]
+    test_idx = indices[int(requested_train) : requested_total]
+    return train_idx, test_idx
+
+
+def _extract_fno_mat_trajectory(
+    dataset: Any,
+    layout: str,
+    sample_index: int,
+    time_stride: int,
+    spatial_stride: int,
+    target_nx: int,
+    target_ny: int,
+) -> np.ndarray:
+    axis_map = {label: idx for idx, label in enumerate(layout)}
+    if set(axis_map.keys()) != {"N", "T", "H", "W"}:
+        raise ValueError(f"FNO MAT layout must be a permutation of N,T,H,W. Got '{layout}'.")
+
+    slicer = [slice(None)] * 4
+    slicer[axis_map["N"]] = int(sample_index)
+    sample = np.asarray(dataset[tuple(slicer)], dtype=np.float32)
+    if sample.ndim != 3:
+        raise ValueError(
+            f"Expected one-sample slice to be rank 3, got shape {tuple(sample.shape)} for sample {sample_index}."
+        )
+
+    remaining_labels = [label for label in layout if label != "N"]
+    transpose_order = (
+        remaining_labels.index("T"),
+        remaining_labels.index("H"),
+        remaining_labels.index("W"),
+    )
+    traj = np.transpose(sample, axes=transpose_order)
+    traj = np.asarray(traj[:: int(time_stride), :: int(spatial_stride), :: int(spatial_stride)], dtype=np.float32)
+    if traj.shape[0] < 2:
+        raise ValueError(
+            "Resolved FNO MAT trajectory has fewer than 2 time steps "
+            f"(shape={tuple(traj.shape)}, time_stride={time_stride})."
+        )
+
+    if traj.shape[1:] != (int(target_nx), int(target_ny)):
+        traj = np.asarray(
+            [_match_resolution(frame, int(target_nx), int(target_ny)) for frame in traj],
+            dtype=np.float32,
+        )
+    return traj
+
+
+def _resolve_fno_mat_layout(
+    shape: Tuple[int, int, int, int],
+    layout: str,
+    time_length_hint: int | None = None,
+) -> str:
+    dims = tuple(int(dim) for dim in shape)
+    if len(dims) != 4:
+        raise ValueError(f"FNO MAT layout resolver expects rank-4 shape, got {dims}.")
+
+    normalized = str(layout).strip().upper()
+    required_axes = {"N", "T", "H", "W"}
+    if normalized not in {"", "AUTO"}:
+        resolved = _resolve_layout(4, normalized)
+        if set(resolved) != required_axes:
+            raise ValueError(
+                f"FNO MAT layout must be a permutation of N,T,H,W. Got '{resolved}'."
+            )
+        return resolved
+
+    spatial_pair: Tuple[int, int] | None = None
+    best_pair_dim = -1
+    all_axes = list(range(4))
+    for left_idx in range(len(all_axes)):
+        for right_idx in range(left_idx + 1, len(all_axes)):
+            axis_left = all_axes[left_idx]
+            axis_right = all_axes[right_idx]
+            dim_left = dims[axis_left]
+            dim_right = dims[axis_right]
+            if dim_left == dim_right and dim_left > best_pair_dim:
+                spatial_pair = (axis_left, axis_right)
+                best_pair_dim = dim_left
+
+    if spatial_pair is not None:
+        h_axis, w_axis = sorted((int(spatial_pair[0]), int(spatial_pair[1])))
+        remaining = [axis for axis in range(4) if axis not in spatial_pair]
+        if len(remaining) != 2:
+            raise ValueError(f"Could not infer FNO MAT layout from shape {dims}.")
+        axis_a, axis_b = int(remaining[0]), int(remaining[1])
+        dim_a, dim_b = int(dims[axis_a]), int(dims[axis_b])
+
+        t_axis: int
+        if time_length_hint is not None and dim_a == int(time_length_hint) and dim_b != int(time_length_hint):
+            t_axis = axis_a
+        elif time_length_hint is not None and dim_b == int(time_length_hint) and dim_a != int(time_length_hint):
+            t_axis = axis_b
+        elif dim_a > 512 >= dim_b:
+            t_axis = axis_b
+        elif dim_b > 512 >= dim_a:
+            t_axis = axis_a
+        else:
+            t_axis = axis_a if dim_a >= dim_b else axis_b
+        n_axis = axis_b if t_axis == axis_a else axis_a
+    else:
+        max_dim = max(dims)
+        max_axes = [axis for axis, dim in enumerate(dims) if dim == max_dim]
+        n_axis = int(max_axes[0])
+        remaining = [axis for axis in range(4) if axis != n_axis]
+        ranked = sorted(remaining, key=lambda axis: int(dims[axis]), reverse=True)
+        h_axis, w_axis = sorted((int(ranked[0]), int(ranked[1])))
+        t_candidates = [axis for axis in remaining if axis not in {h_axis, w_axis}]
+        if len(t_candidates) != 1:
+            raise ValueError(f"Could not infer FNO MAT layout from shape {dims}.")
+        t_axis = int(t_candidates[0])
+
+    labels = [""] * 4
+    labels[n_axis] = "N"
+    labels[t_axis] = "T"
+    labels[h_axis] = "H"
+    labels[w_axis] = "W"
+    resolved = "".join(labels)
+    if set(resolved) != required_axes:
+        raise ValueError(f"Failed to infer valid FNO MAT layout from shape {dims}: '{resolved}'.")
+    return resolved
+
+
+def _extract_time_length_hint(time_values: Any) -> int | None:
+    if time_values is None:
+        return None
+    arr = np.asarray(time_values, dtype=np.float64).squeeze()
+    if arr.ndim != 1:
+        return None
+    if arr.size < 2:
+        return None
+    return int(arr.shape[0])
+
+
+def _infer_dt_from_mat_time(
+    time_values: Any,
+    n_steps_raw: int,
+    time_stride: int,
+) -> float | None:
+    if time_values is None:
+        return None
+
+    arr = np.asarray(time_values, dtype=np.float64)
+    if arr.size < 2:
+        return None
+
+    candidates: List[np.ndarray] = []
+    if arr.ndim == 1:
+        candidates.append(arr.reshape(-1))
+    else:
+        for axis, axis_size in enumerate(arr.shape):
+            if int(axis_size) != int(n_steps_raw):
+                continue
+            index = [0] * arr.ndim
+            index[axis] = slice(None)
+            seq = np.asarray(arr[tuple(index)], dtype=np.float64).reshape(-1)
+            if seq.size >= 2:
+                candidates.append(seq)
+    if not candidates and arr.size == int(n_steps_raw):
+        candidates.append(arr.reshape(-1))
+
+    for sequence in candidates:
+        dt = _infer_dt_from_time_sequence(sequence, time_stride=time_stride)
+        if dt is not None:
+            return dt
+    return None
+
+
+def _infer_dt_from_time_sequence(sequence: np.ndarray, time_stride: int) -> float | None:
+    values = np.asarray(sequence, dtype=np.float64).reshape(-1)
+    if values.size < 2:
+        return None
+
+    diffs = np.diff(values)
+    finite = diffs[np.isfinite(diffs)]
+    finite = finite[np.abs(finite) > 0.0]
+    if finite.size == 0:
+        return None
+
+    dt = float(np.median(np.abs(finite))) * float(max(1, int(time_stride)))
+    if np.isfinite(dt) and dt > 0.0:
+        return dt
+    return None

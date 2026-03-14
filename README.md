@@ -22,6 +22,7 @@ Structured repo for RSD experiments on:
   - `from models.navier_stokes import ...`
   - `from models.reaction_diffusion import ...`
 - Existing run CLIs are unchanged (`runs/run_navier_stokes.py`, `runs/run_reaction_diffusion.py`).
+- Added case-study entrypoint: `runs/run_unsteady_ns.py` (uses the same NS train/eval pipeline as `run_navier_stokes.py`).
 - Refactor note: internals moved from flat files into package subdirectories for maintainability, while public API names were re-exported.
 
 ## Entry Scripts
@@ -39,6 +40,7 @@ python3 runs/run_navier_stokes.py configs/navier_stokes.yaml conv 1
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml fno 1 --device cuda
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml tfno 1 --device cuda
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml uno 1 --device cuda
+python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml tfno 1 --device cuda
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml fno 7 --device mps --loss spectral_decay --basis wavelet
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml tfno 7 --device mps
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml uno 7 --device mps
@@ -61,7 +63,7 @@ Each YAML controls all run parameters, including:
 - PDE physics constants
 - time integration
 - train/test trajectory counts
-- data source selection (`data.external.source`: `generated`, `neuraloperator`, `pdebench`)
+- data source selection (`data.external.source`: `generated`, `neuraloperator`, `pdebench`, `fno_mat`)
 - training hyperparameters (`noise_level`, `lr`, `n_iter`, `batch_size`, `grad_clip`, `weight_decay`)
 - optional one-cycle learning-rate schedule (`training.use_one_cycle_lr`, `training.one_cycle_pct_start`, `training.one_cycle_div_factor`, `training.one_cycle_final_div_factor`)
 - checkpoint cadence (`training.checkpoint_every_epochs`, default `20`)
@@ -86,16 +88,48 @@ Each YAML controls all run parameters, including:
 
 ### External Navier-Stokes Data
 
-`runs/run_navier_stokes.py` supports three sources through `data.external`:
+`runs/run_navier_stokes.py` supports four sources through `data.external`:
 - `generated`: default pseudo-spectral solver trajectories (current behavior).
 - `neuraloperator`: uses `neuralop.data.datasets.load_navier_stokes_pt(...)`.
 - `pdebench`: reads local PDEBench HDF5 trajectories (for example, `tensor` datasets).
+- `fno_mat`: reads full-trajectory FNO MAT files (for example, `NavierStokes_V1e-3_N5000_T50.mat`) via `data.external.fno_mat`.
 
 Notes:
 - NeuralOperator PT data is one-step-oriented; the runner constructs short trajectories from each batch sample's `x/y` pair.
 - PDEBench mode expects a local HDF5 file path (`data.external.pdebench.file_path`) and supports layout mapping via `data.external.pdebench.layout` (`AUTO`, `NTHW`, `NTHWC`, etc.).
+- FNO MAT mode expects trajectories under key `u`; loader orientation is auto-resolved to `[N,T,H,W]` and then converted into standard NS trajectory windows/pairs through the existing training helpers.
 - For PDEBench `ns_incom` velocity files, the loader converts `(u, v)` to vorticity `omega = dv/dx - du/dy` before model training/evaluation so NS-RSD metrics remain on vorticity trajectories.
 - In all modes, noisy training data is now explicitly corrupted in memory (HF spectral noise injection) before fitting the noisy model.
+
+### Unsteady NS Case Study (`unsteady_ns`)
+
+This case study uses the original FNO trajectory dataset `NavierStokes_V1e-3_N5000_T50.mat`.
+Temporal-window training is configured explicitly with `input_steps: 10` (under `training.neural_operator.*.temporal`).
+
+Download:
+
+```bash
+python3 data/download_fno_ns_mat.py --output-dir external_data/fno
+```
+
+Train + eval (single command; eval is integrated into the run):
+
+```bash
+python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml tfno 1 --device cuda
+```
+
+Equivalent eval command:
+
+```bash
+python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml tfno 1 --device cuda
+```
+
+Expected output paths:
+- `output/unsteady_ns/tfno/loss_l2/basis_fourier/seed_1/results.json`
+- `output/unsteady_ns/tfno/loss_l2/basis_fourier/seed_1/summary.png`
+- `output/unsteady_ns/tfno/loss_l2/basis_fourier/seed_1/fit_quality/eval_clean.png`
+- `checkpoints/unsteady_ns/tfno/loss_l2/basis_fourier/seed_1/model_clean.npz`
+- `checkpoints/unsteady_ns/tfno/loss_l2/basis_fourier/seed_1/model_noisy.npz`
 
 #### PDEBench Downloader Helper
 

@@ -296,6 +296,10 @@ def _normalize_source(source: str) -> str:
         "neuralop": "neuraloperator",
         "pdebench": "pdebench",
         "pde_bench": "pdebench",
+        "fno_mat": "fno_mat",
+        "fno_trajectory_mat": "fno_mat",
+        "fno_trajectories": "fno_mat",
+        "fno_matlab": "fno_mat",
     }
     if normalized not in alias_map:
         supported = ", ".join(sorted(set(alias_map.values())))
