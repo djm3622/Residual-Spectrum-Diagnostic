@@ -9,11 +9,13 @@ logs/
 std_out/
 external_data/*
 .mplcache/
+evaluatin/
 
 # files
 run_all_conv_seed1_loss_basis.sh
 batch_ns.sh
 batch_rd.sh
+batch_un.sh
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
