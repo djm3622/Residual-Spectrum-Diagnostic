@@ -64,6 +64,7 @@ class NSConfig:
     train_early_stopping_patience: int = 20
     train_model_width: int = 64
     train_model_depth: int = 5
+    train_dataloader_num_workers: int = -1
 
     omega_1_frac: float = 1 / 16
     omega_2_frac: float = 1 / 6
@@ -134,6 +135,9 @@ class NSConfig:
             train_early_stopping_patience=int(training.get("early_stopping_patience", 20)),
             train_model_width=int(training.get("model_width", 64)),
             train_model_depth=int(training.get("model_depth", 5)),
+            train_dataloader_num_workers=int(
+                training.get("dataloader_num_workers", training.get("num_workers", -1))
+            ),
             omega_1_frac=float(rsd["omega_1_frac"]),
             omega_2_frac=float(rsd["omega_2_frac"]),
         )

@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Dataset, TensorDataset, WeightedRandomSampler
 
 from models.losses import ObjectiveLoss
 from utils.progress import progress_range
@@ -60,6 +61,23 @@ class ConvolutionalSurrogate2DCoupled:
         v_next = sanitize_species(pred[1])
         return u_next, v_next
 
+    def _compute_channel_rms(self, stats_loader: DataLoader) -> torch.Tensor:
+        sum_sq: torch.Tensor | None = None
+        count = 0
+        for _, yb_cpu in stats_loader:
+            yb = yb_cpu.to(self.device, dtype=torch.float32, non_blocking=True)
+            reduce_dims = tuple(idx for idx in range(yb.ndim) if idx != 1)
+            batch_sum_sq = torch.sum(yb * yb, dim=reduce_dims, keepdim=True)
+            if sum_sq is None:
+                sum_sq = batch_sum_sq
+            else:
+                sum_sq = sum_sq + batch_sum_sq
+            count += int(yb.numel() // max(1, int(yb.shape[1])))
+        if sum_sq is None or count <= 0:
+            raise ValueError("Training dataset is empty.")
+        channel_rms = torch.sqrt(torch.clamp(sum_sq / float(count), min=1e-12))
+        return torch.clamp(channel_rms, min=1e-6)
+
     def train(
         self,
         inputs_u: List[np.ndarray],
@@ -87,6 +105,9 @@ class ConvolutionalSurrogate2DCoupled:
         checkpoint_callback: Callable[[int, float, Dict[str, Any]], None] | None = None,
         early_stopping_patience: int | None = None,
         resume_state: Dict[str, Any] | None = None,
+        train_dataset: Dataset[Tuple[torch.Tensor, torch.Tensor]] | None = None,
+        val_dataset: Dataset[Tuple[torch.Tensor, torch.Tensor]] | None = None,
+        dataloader_num_workers: int = 0,
         u_weight: float = 1.0,
         v_weight: float = 1.0,
         channel_balance_cap: float = 3.0,
@@ -96,49 +117,92 @@ class ConvolutionalSurrogate2DCoupled:
         show_progress: bool = False,
         progress_desc: str | None = None,
     ) -> None:
-        if not inputs_u:
-            raise ValueError("Training inputs are empty.")
+        if train_dataset is None:
+            if not inputs_u:
+                raise ValueError("Training inputs are empty.")
 
-        x_u = np.asarray(inputs_u, dtype=np.float32)
-        x_v = np.asarray(inputs_v, dtype=np.float32)
-        y_u = np.asarray(targets_u, dtype=np.float32)
-        y_v = np.asarray(targets_v, dtype=np.float32)
+            x_u = np.asarray(inputs_u, dtype=np.float32)
+            x_v = np.asarray(inputs_v, dtype=np.float32)
+            y_u = np.asarray(targets_u, dtype=np.float32)
+            y_v = np.asarray(targets_v, dtype=np.float32)
+            train_dataset = TensorDataset(
+                torch.from_numpy(np.stack([x_u, x_v], axis=1)),
+                torch.from_numpy(np.stack([y_u, y_v], axis=1)),
+            )
+        if len(train_dataset) == 0:
+            raise ValueError("Training dataset is empty.")
 
-        x_train = torch.from_numpy(np.stack([x_u, x_v], axis=1)).to(self.device)
-        y_train = torch.from_numpy(np.stack([y_u, y_v], axis=1)).to(self.device)
-        has_val = (
-            val_inputs_u is not None
-            and val_inputs_v is not None
-            and val_targets_u is not None
-            and val_targets_v is not None
-            and len(val_inputs_u) > 0
-            and len(val_inputs_u) == len(val_inputs_v) == len(val_targets_u) == len(val_targets_v)
-        )
-        if has_val:
-            x_val = torch.from_numpy(
-                np.stack(
-                    [
-                        np.asarray(val_inputs_u, dtype=np.float32),
-                        np.asarray(val_inputs_v, dtype=np.float32),
-                    ],
-                    axis=1,
+        if val_dataset is None:
+            has_val_inputs = (
+                val_inputs_u is not None
+                and val_inputs_v is not None
+                and val_targets_u is not None
+                and val_targets_v is not None
+                and len(val_inputs_u) > 0
+                and len(val_inputs_u) == len(val_inputs_v) == len(val_targets_u) == len(val_targets_v)
+            )
+            if has_val_inputs:
+                val_dataset = TensorDataset(
+                    torch.from_numpy(
+                        np.stack(
+                            [
+                                np.asarray(val_inputs_u, dtype=np.float32),
+                                np.asarray(val_inputs_v, dtype=np.float32),
+                            ],
+                            axis=1,
+                        )
+                    ),
+                    torch.from_numpy(
+                        np.stack(
+                            [
+                                np.asarray(val_targets_u, dtype=np.float32),
+                                np.asarray(val_targets_v, dtype=np.float32),
+                            ],
+                            axis=1,
+                        )
+                    ),
                 )
-            ).to(self.device)
-            y_val = torch.from_numpy(
-                np.stack(
-                    [
-                        np.asarray(val_targets_u, dtype=np.float32),
-                        np.asarray(val_targets_v, dtype=np.float32),
-                    ],
-                    axis=1,
-                )
-            ).to(self.device)
+
+        n_samples = len(train_dataset)
+        batch = max(1, min(int(batch_size), n_samples))
+        num_workers = max(0, int(dataloader_num_workers))
+        pin_memory = str(self.device).startswith("cuda")
+        loader_kwargs: Dict[str, Any] = {
+            "batch_size": batch,
+            "num_workers": num_workers,
+            "pin_memory": pin_memory,
+        }
+        if num_workers > 0:
+            loader_kwargs["persistent_workers"] = True
+            loader_kwargs["prefetch_factor"] = 2
+
+        early_bias = max(0.0, float(early_step_bias))
+        early_decay = max(1.0, float(early_step_decay))
+        sample_weights_cpu: torch.Tensor | None = None
+        if pair_steps is not None and len(pair_steps) == n_samples and early_bias > 0.0:
+            step_arr = np.asarray(pair_steps, dtype=np.float32)
+            step_weights = 1.0 + early_bias * np.exp(-step_arr / early_decay)
+            sample_weights_cpu = torch.from_numpy(step_weights.astype(np.float64, copy=False))
+            sample_weights_cpu = sample_weights_cpu / torch.sum(sample_weights_cpu)
+
+        if sample_weights_cpu is not None:
+            sampler = WeightedRandomSampler(
+                weights=sample_weights_cpu,
+                num_samples=n_samples,
+                replacement=True,
+            )
+            train_loader = DataLoader(train_dataset, sampler=sampler, **loader_kwargs)
         else:
-            x_val = None
-            y_val = None
+            train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
+        stats_loader = DataLoader(train_dataset, shuffle=False, **loader_kwargs)
+        has_val = val_dataset is not None and len(val_dataset) > 0
+        if has_val and val_dataset is not None:
+            val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
+        else:
+            val_loader = None
+
         # Keep coupled training balanced without letting small-magnitude channels dominate.
-        channel_rms = torch.sqrt(torch.mean(y_train * y_train, dim=(0, 2, 3), keepdim=True))
-        channel_rms = torch.clamp(channel_rms, min=1e-6)
+        channel_rms = self._compute_channel_rms(stats_loader)
         balance_cap = max(1.0, float(channel_balance_cap))
         reference_scale = torch.max(channel_rms)
         min_scale = torch.clamp(reference_scale / balance_cap, min=1e-6)
@@ -155,8 +219,6 @@ class ConvolutionalSurrogate2DCoupled:
         def _scaled_state(state: torch.Tensor) -> torch.Tensor:
             return (state / channel_scale) * channel_weight_sqrt
 
-        n_samples = x_train.shape[0]
-        batch = max(1, min(int(batch_size), n_samples))
         clip = max(float(grad_clip), 1e-8)
         wd = max(0.0, float(weight_decay))
         one_cycle_enabled = bool(use_one_cycle_lr)
@@ -176,15 +238,6 @@ class ConvolutionalSurrogate2DCoupled:
         best_val_loss = float("inf")
         epochs_without_improvement = 0
         best_state: Dict[str, Any] | None = None
-
-        early_bias = max(0.0, float(early_step_bias))
-        early_decay = max(1.0, float(early_step_decay))
-        sample_weights: torch.Tensor | None = None
-        if pair_steps is not None and len(pair_steps) == n_samples and early_bias > 0.0:
-            step_arr = np.asarray(pair_steps, dtype=np.float32)
-            step_weights = 1.0 + early_bias * np.exp(-step_arr / early_decay)
-            sample_weights = torch.from_numpy(step_weights).to(self.device)
-            sample_weights = sample_weights / torch.sum(sample_weights)
 
         use_rollout = (
             rollout_w > 0.0
@@ -222,7 +275,7 @@ class ConvolutionalSurrogate2DCoupled:
             weight_decay=wd,
         )
         total_iter = max(1, int(n_iter))
-        steps_per_epoch = max(1, int(np.ceil(n_samples / batch)))
+        steps_per_epoch = max(1, len(train_loader))
         total_steps = max(1, total_iter * steps_per_epoch)
         scheduler = None
         if one_cycle_enabled:
@@ -320,7 +373,7 @@ class ConvolutionalSurrogate2DCoupled:
             }
 
         def _compute_validation_loss() -> float:
-            if not has_val or x_val is None or y_val is None:
+            if not has_val or val_loader is None:
                 return float("nan")
 
             was_training = self.net.training
@@ -328,9 +381,9 @@ class ConvolutionalSurrogate2DCoupled:
             total = 0.0
             count = 0
             with torch.inference_mode():
-                for start in range(0, x_val.shape[0], batch):
-                    xb_val = x_val[start : start + batch]
-                    yb_val = y_val[start : start + batch]
+                for xb_val_cpu, yb_val_cpu in val_loader:
+                    xb_val = xb_val_cpu.to(self.device, non_blocking=True)
+                    yb_val = yb_val_cpu.to(self.device, non_blocking=True)
                     with train_autocast(self.device):
                         pred_val = self.net(xb_val)
                         one_step_val = self.objective_loss(
@@ -366,14 +419,9 @@ class ConvolutionalSurrogate2DCoupled:
             epoch_idx = start_epoch + iter_offset
             train_loss_sum = 0.0
             train_loss_count = 0
-            if sample_weights is not None:
-                perm = torch.multinomial(sample_weights, n_samples, replacement=True)
-            else:
-                perm = torch.randperm(n_samples, device=self.device)
-            for start in range(0, n_samples, batch):
-                idx = perm[start : start + batch]
-                xb = x_train.index_select(0, idx)
-                yb = y_train.index_select(0, idx)
+            for xb_cpu, yb_cpu in train_loader:
+                xb = xb_cpu.to(self.device, non_blocking=True)
+                yb = yb_cpu.to(self.device, non_blocking=True)
 
                 with train_autocast(self.device):
                     pred = self.net(xb)

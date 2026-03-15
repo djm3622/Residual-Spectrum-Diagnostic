@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from models.losses import ObjectiveLoss
 from utils.progress import progress_range
@@ -158,6 +159,50 @@ class NeuralOperatorSurrogate2D:
         )
         self.target_std = torch.clamp(self.target_std, min=1e-6)
 
+    def _fit_normalizers_from_loader(self, train_loader: DataLoader) -> None:
+        x_sum: torch.Tensor | None = None
+        x_sq_sum: torch.Tensor | None = None
+        y_sum: torch.Tensor | None = None
+        y_sq_sum: torch.Tensor | None = None
+        count = 0
+
+        for xb_cpu, yb_cpu in train_loader:
+            xb = xb_cpu.to(self.device, dtype=torch.float32, non_blocking=True)
+            yb = yb_cpu.to(self.device, dtype=torch.float32, non_blocking=True)
+            reduce_dims = tuple(idx for idx in range(xb.ndim) if idx != 1)
+            x_batch_sum = torch.sum(xb, dim=reduce_dims, keepdim=True)
+            x_batch_sq_sum = torch.sum(xb * xb, dim=reduce_dims, keepdim=True)
+            y_batch_sum = torch.sum(yb, dim=reduce_dims, keepdim=True)
+            y_batch_sq_sum = torch.sum(yb * yb, dim=reduce_dims, keepdim=True)
+
+            if x_sum is None:
+                x_sum = x_batch_sum
+                x_sq_sum = x_batch_sq_sum
+                y_sum = y_batch_sum
+                y_sq_sum = y_batch_sq_sum
+            else:
+                x_sum = x_sum + x_batch_sum
+                x_sq_sum = x_sq_sum + x_batch_sq_sum
+                y_sum = y_sum + y_batch_sum
+                y_sq_sum = y_sq_sum + y_batch_sq_sum
+
+            elements_per_channel = int(xb.numel() // max(1, int(xb.shape[1])))
+            count += elements_per_channel
+
+        if x_sum is None or x_sq_sum is None or y_sum is None or y_sq_sum is None or count <= 0:
+            raise ValueError("Training dataset is empty.")
+
+        denom = float(count)
+        self.input_mean = (x_sum / denom).to(device=self.device, dtype=torch.float32)
+        x_var = torch.clamp((x_sq_sum / denom) - self.input_mean * self.input_mean, min=1e-12)
+        self.input_std = torch.sqrt(x_var).to(device=self.device, dtype=torch.float32)
+        self.input_std = torch.clamp(self.input_std, min=1e-6)
+
+        self.target_mean = (y_sum / denom).to(device=self.device, dtype=torch.float32)
+        y_var = torch.clamp((y_sq_sum / denom) - self.target_mean * self.target_mean, min=1e-12)
+        self.target_std = torch.sqrt(y_var).to(device=self.device, dtype=torch.float32)
+        self.target_std = torch.clamp(self.target_std, min=1e-6)
+
     def _predict_batch(self, x: torch.Tensor) -> torch.Tensor:
         x_norm = (x - self.input_mean) / self.input_std
         pred_norm = self.net(x_norm)
@@ -262,47 +307,72 @@ class NeuralOperatorSurrogate2D:
         checkpoint_callback: Callable[[int, float, Dict[str, Any]], None] | None = None,
         early_stopping_patience: int | None = None,
         resume_state: Dict[str, Any] | None = None,
+        train_dataset: Dataset[Tuple[torch.Tensor, torch.Tensor]] | None = None,
+        val_dataset: Dataset[Tuple[torch.Tensor, torch.Tensor]] | None = None,
+        dataloader_num_workers: int = 0,
         show_progress: bool = False,
         progress_desc: str | None = None,
     ) -> None:
-        if not inputs:
-            raise ValueError("Training inputs are empty.")
+        if train_dataset is None:
+            if not inputs:
+                raise ValueError("Training inputs are empty.")
+            x_arr = np.asarray(inputs, dtype=np.float32)
+            y_arr = np.asarray(targets, dtype=np.float32)
+            if self.temporal_enabled:
+                if x_arr.ndim != 4 or y_arr.ndim != 4:
+                    raise ValueError(
+                        "Temporal mode expects windowed tensors with shape [N,T,H,W] "
+                        f"(got x={x_arr.shape}, y={y_arr.shape})."
+                    )
+            else:
+                if x_arr.ndim != 3 or y_arr.ndim != 3:
+                    raise ValueError(
+                        "One-step mode expects tensors with shape [N,H,W] "
+                        f"(got x={x_arr.shape}, y={y_arr.shape})."
+                    )
+            train_dataset = TensorDataset(
+                torch.from_numpy(x_arr[:, np.newaxis, ...]),
+                torch.from_numpy(y_arr[:, np.newaxis, ...]),
+            )
+        if len(train_dataset) == 0:
+            raise ValueError("Training dataset is empty.")
 
-        x_arr = np.asarray(inputs, dtype=np.float32)
-        y_arr = np.asarray(targets, dtype=np.float32)
-        if self.temporal_enabled:
-            if x_arr.ndim != 4 or y_arr.ndim != 4:
-                raise ValueError(
-                    "Temporal mode expects windowed tensors with shape [N,T,H,W] "
-                    f"(got x={x_arr.shape}, y={y_arr.shape})."
+        if val_dataset is None:
+            has_val_inputs = (
+                val_inputs is not None
+                and val_targets is not None
+                and len(val_inputs) > 0
+                and len(val_inputs) == len(val_targets)
+            )
+            if has_val_inputs:
+                x_val_arr = np.asarray(val_inputs, dtype=np.float32)
+                y_val_arr = np.asarray(val_targets, dtype=np.float32)
+                val_dataset = TensorDataset(
+                    torch.from_numpy(x_val_arr[:, np.newaxis, ...]),
+                    torch.from_numpy(y_val_arr[:, np.newaxis, ...]),
                 )
-        else:
-            if x_arr.ndim != 3 or y_arr.ndim != 3:
-                raise ValueError(
-                    "One-step mode expects tensors with shape [N,H,W] "
-                    f"(got x={x_arr.shape}, y={y_arr.shape})."
-                )
 
-        x_train = torch.from_numpy(x_arr[:, np.newaxis, ...])
-        y_train = torch.from_numpy(y_arr[:, np.newaxis, ...])
-        self._fit_normalizers(x_train, y_train)
-        has_val = (
-            val_inputs is not None
-            and val_targets is not None
-            and len(val_inputs) > 0
-            and len(val_inputs) == len(val_targets)
-        )
-        if has_val:
-            x_val_arr = np.asarray(val_inputs, dtype=np.float32)
-            y_val_arr = np.asarray(val_targets, dtype=np.float32)
-            x_val = torch.from_numpy(x_val_arr[:, np.newaxis, ...])
-            y_val = torch.from_numpy(y_val_arr[:, np.newaxis, ...])
-        else:
-            x_val = None
-            y_val = None
-
-        n_samples = x_train.shape[0]
+        n_samples = len(train_dataset)
         batch = max(1, min(int(batch_size), n_samples))
+        num_workers = max(0, int(dataloader_num_workers))
+        pin_memory = str(self.device).startswith("cuda")
+        loader_kwargs: Dict[str, Any] = {
+            "batch_size": batch,
+            "num_workers": num_workers,
+            "pin_memory": pin_memory,
+        }
+        if num_workers > 0:
+            loader_kwargs["persistent_workers"] = True
+            loader_kwargs["prefetch_factor"] = 2
+        train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
+        stats_loader = DataLoader(train_dataset, shuffle=False, **loader_kwargs)
+        self._fit_normalizers_from_loader(stats_loader)
+        has_val = val_dataset is not None and len(val_dataset) > 0
+        if has_val and val_dataset is not None:
+            val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
+        else:
+            val_loader = None
+
         clip = max(float(grad_clip), 1e-8)
         wd = max(0.0, float(weight_decay))
         one_cycle_enabled = bool(use_one_cycle_lr)
@@ -349,7 +419,7 @@ class NeuralOperatorSurrogate2D:
             weight_decay=wd,
         )
         total_iter = max(1, int(n_iter))
-        steps_per_epoch = max(1, int(np.ceil(n_samples / batch)))
+        steps_per_epoch = max(1, len(train_loader))
         total_steps = max(1, total_iter * steps_per_epoch)
         scheduler = None
         if one_cycle_enabled:
@@ -448,7 +518,7 @@ class NeuralOperatorSurrogate2D:
             }
 
         def _compute_validation_loss() -> float:
-            if not has_val or x_val is None or y_val is None:
+            if not has_val or val_loader is None:
                 return float("nan")
 
             was_training = self.net.training
@@ -456,9 +526,9 @@ class NeuralOperatorSurrogate2D:
             total = 0.0
             count = 0
             with torch.inference_mode():
-                for start in range(0, x_val.shape[0], batch):
-                    xb_val = x_val[start : start + batch].to(self.device, non_blocking=True)
-                    yb_val = y_val[start : start + batch].to(self.device, non_blocking=True)
+                for xb_val_cpu, yb_val_cpu in val_loader:
+                    xb_val = xb_val_cpu.to(self.device, non_blocking=True)
+                    yb_val = yb_val_cpu.to(self.device, non_blocking=True)
                     with train_autocast(self.device):
                         pred_val = self._predict_batch(xb_val)
                         loss_val = self.objective_loss(
@@ -487,11 +557,9 @@ class NeuralOperatorSurrogate2D:
             epoch_idx = start_epoch + iter_offset
             train_loss_sum = 0.0
             train_loss_count = 0
-            perm = torch.randperm(n_samples)
-            for start in range(0, n_samples, batch):
-                idx = perm[start : start + batch]
-                xb = x_train.index_select(0, idx).to(self.device, non_blocking=True)
-                yb = y_train.index_select(0, idx).to(self.device, non_blocking=True)
+            for xb_cpu, yb_cpu in train_loader:
+                xb = xb_cpu.to(self.device, non_blocking=True)
+                yb = yb_cpu.to(self.device, non_blocking=True)
 
                 with train_autocast(self.device):
                     pred = self._predict_batch(xb)

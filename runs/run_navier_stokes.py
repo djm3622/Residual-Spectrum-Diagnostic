@@ -35,7 +35,11 @@ from eval.navier_stokes import future_block_rel_l2 as _future_block_rel_l2
 from models.navier_stokes import LOSS_CHOICES, build_model, normalize_loss_name, rollout_2d
 from runs.helpers.common import load_best_checkpoint_for_eval as _load_best_checkpoint_for_eval
 from runs.helpers.common import move_model_device as _move_model_device
-from runs.helpers.navier_stokes_training import build_supervised_pairs as _build_supervised_pairs
+from runs.helpers.indexed_datasets import (
+    NavierStokesIndexedPairDataset as _NavierStokesIndexedPairDataset,
+)
+from runs.helpers.indexed_datasets import resolve_dataloader_num_workers as _resolve_dataloader_num_workers
+from runs.helpers.navier_stokes_training import build_noisy_trajectories as _build_noisy_trajectories
 from runs.helpers.navier_stokes_training import noisy_reference_field as _noisy_reference_field
 from runs.helpers.navier_stokes_training import noisy_reference_trajectory as _noisy_reference_trajectory
 from runs.helpers.temporal import resolve_temporal_training_config as _resolve_temporal_training_config
@@ -89,6 +93,7 @@ def run_single_seed(
     temporal_enabled = bool(temporal_cfg["enabled"])
     temporal_window = int(temporal_cfg["input_steps"])
     temporal_target_mode = str(temporal_cfg["target_mode"])
+    dataloader_workers = _resolve_dataloader_num_workers(config.train_dataloader_num_workers)
     checkpoint_interval = max(1, int(checkpoint_every_epochs))
     resolved_checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir is not None else None
     best_val_tracker: Dict[str, float] = {
@@ -191,38 +196,27 @@ def run_single_seed(
     if not valid_trajectory_steps:
         valid_trajectory_steps = [0, n_snapshots - 1]
 
-    inputs, targets_clean, _ = _build_supervised_pairs(
+    train_dataset_clean = _NavierStokesIndexedPairDataset(
         fit_trajectories,
-        config,
-        temporal_enabled,
-        temporal_window,
-        temporal_target_mode,
-        noisy=False,
-        show_progress=show_data_progress,
-        progress_desc="Build train pairs",
-        return_trajectories=False,
+        temporal_enabled=temporal_enabled,
+        temporal_window=temporal_window,
+        temporal_target_mode=temporal_target_mode,
     )
-    val_inputs, val_targets_clean, _ = _build_supervised_pairs(
+    val_dataset_clean = _NavierStokesIndexedPairDataset(
         val_trajectories,
-        config,
-        temporal_enabled,
-        temporal_window,
-        temporal_target_mode,
-        noisy=False,
-        show_progress=False,
-        progress_desc="Build validation pairs",
-        return_trajectories=False,
+        temporal_enabled=temporal_enabled,
+        temporal_window=temporal_window,
+        temporal_target_mode=temporal_target_mode,
     )
 
-    if not inputs:
+    if len(train_dataset_clean) == 0:
         raise ValueError(
             "No training pairs were generated. "
             f"temporal_enabled={temporal_enabled}, temporal_window={temporal_window}, "
             f"n_snapshots={n_snapshots}"
         )
-    eval_pair_index = int(np.clip(eval_pair_index, 0, len(inputs) - 1))
-    eval_input_reference = np.asarray(inputs[eval_pair_index], dtype=np.float32)
-    eval_target_clean_reference = np.asarray(targets_clean[eval_pair_index], dtype=np.float32)
+    eval_pair_index = int(np.clip(eval_pair_index, 0, len(train_dataset_clean) - 1))
+    eval_input_reference, eval_target_clean_reference = train_dataset_clean.get_pair_arrays(eval_pair_index)
 
     model_clean = build_model(
         method,
@@ -238,9 +232,15 @@ def run_single_seed(
     def _clean_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
         _save_checkpoint_event("clean", epoch, val_loss, training_state)
 
+    rollout_trajectories_clean = (
+        fit_trajectories
+        if config.train_rollout_weight > 0.0 and config.train_rollout_horizon > 1
+        else None
+    )
+
     model_clean.train(
-        inputs,
-        targets_clean,
+        inputs=[],
+        targets=[],
         lr=config.train_lr,
         n_iter=config.train_iterations,
         batch_size=config.train_batch_size,
@@ -250,14 +250,17 @@ def run_single_seed(
         one_cycle_pct_start=config.train_one_cycle_pct_start,
         one_cycle_div_factor=config.train_one_cycle_div_factor,
         one_cycle_final_div_factor=config.train_one_cycle_final_div_factor,
-        trajectory=fit_trajectories,
+        trajectory=rollout_trajectories_clean,
         rollout_horizon=config.train_rollout_horizon,
         rollout_weight=config.train_rollout_weight,
-        val_inputs=val_inputs,
-        val_targets=val_targets_clean,
+        val_inputs=[],
+        val_targets=[],
         checkpoint_callback=_clean_checkpoint_callback,
         early_stopping_patience=config.train_early_stopping_patience,
         resume_state=resume_clean_state,
+        train_dataset=train_dataset_clean,
+        val_dataset=val_dataset_clean if len(val_dataset_clean) > 0 else None,
+        dataloader_num_workers=dataloader_workers,
         show_progress=show_training_progress,
         progress_desc="Training clean model",
     )
@@ -280,45 +283,47 @@ def run_single_seed(
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    del inputs, targets_clean, val_inputs, val_targets_clean
+    del train_dataset_clean, val_dataset_clean
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    inputs_noisy, targets_noisy, fit_trajectories_noisy = _build_supervised_pairs(
+    fit_trajectories_noisy = _build_noisy_trajectories(
         fit_trajectories,
         config,
-        temporal_enabled,
-        temporal_window,
-        temporal_target_mode,
-        noisy=True,
         show_progress=show_data_progress,
-        progress_desc="Build noisy train pairs",
-        return_trajectories=True,
+        progress_desc="Build noisy train trajectories",
     )
-    val_inputs_noisy, val_targets_noisy, _ = _build_supervised_pairs(
+    val_trajectories_noisy = _build_noisy_trajectories(
         val_trajectories,
         config,
-        temporal_enabled,
-        temporal_window,
-        temporal_target_mode,
-        noisy=True,
         show_progress=False,
-        progress_desc="Build noisy validation pairs",
-        return_trajectories=False,
+        progress_desc="Build noisy validation trajectories",
     )
-    if not inputs_noisy:
+    train_dataset_noisy = _NavierStokesIndexedPairDataset(
+        fit_trajectories_noisy,
+        temporal_enabled=temporal_enabled,
+        temporal_window=temporal_window,
+        temporal_target_mode=temporal_target_mode,
+    )
+    val_dataset_noisy = _NavierStokesIndexedPairDataset(
+        val_trajectories_noisy,
+        temporal_enabled=temporal_enabled,
+        temporal_window=temporal_window,
+        temporal_target_mode=temporal_target_mode,
+    )
+    if len(train_dataset_noisy) == 0:
         raise ValueError(
             "No noisy training pairs were generated. "
             f"temporal_enabled={temporal_enabled}, temporal_window={temporal_window}, "
             f"n_snapshots={n_snapshots}"
         )
-    if eval_pair_index >= len(inputs_noisy):
+    if eval_pair_index >= len(train_dataset_noisy):
         raise ValueError(
             "Noisy training pair count differs from clean training pair count "
-            f"(clean_eval_index={eval_pair_index}, noisy_pairs={len(inputs_noisy)})."
+            f"(clean_eval_index={eval_pair_index}, noisy_pairs={len(train_dataset_noisy)})."
         )
-    eval_target_noisy_reference = np.asarray(targets_noisy[eval_pair_index], dtype=np.float32)
+    _, eval_target_noisy_reference = train_dataset_noisy.get_pair_arrays(eval_pair_index)
     del fit_trajectories, val_trajectories, train_trajectories
     gc.collect()
     if torch.cuda.is_available():
@@ -338,9 +343,15 @@ def run_single_seed(
     def _noisy_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
         _save_checkpoint_event("noisy", epoch, val_loss, training_state)
 
+    rollout_trajectories_noisy = (
+        fit_trajectories_noisy
+        if config.train_rollout_weight > 0.0 and config.train_rollout_horizon > 1
+        else None
+    )
+
     model_noisy.train(
-        inputs_noisy,
-        targets_noisy,
+        inputs=[],
+        targets=[],
         lr=config.train_lr,
         n_iter=config.train_iterations,
         batch_size=config.train_batch_size,
@@ -350,14 +361,17 @@ def run_single_seed(
         one_cycle_pct_start=config.train_one_cycle_pct_start,
         one_cycle_div_factor=config.train_one_cycle_div_factor,
         one_cycle_final_div_factor=config.train_one_cycle_final_div_factor,
-        trajectory=fit_trajectories_noisy,
+        trajectory=rollout_trajectories_noisy,
         rollout_horizon=config.train_rollout_horizon,
         rollout_weight=config.train_rollout_weight,
-        val_inputs=val_inputs_noisy,
-        val_targets=val_targets_noisy,
+        val_inputs=[],
+        val_targets=[],
         checkpoint_callback=_noisy_checkpoint_callback,
         early_stopping_patience=config.train_early_stopping_patience,
         resume_state=resume_noisy_state,
+        train_dataset=train_dataset_noisy,
+        val_dataset=val_dataset_noisy if len(val_dataset_noisy) > 0 else None,
+        dataloader_num_workers=dataloader_workers,
         show_progress=show_training_progress,
         progress_desc="Training noisy model",
     )
@@ -380,7 +394,7 @@ def run_single_seed(
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    del inputs_noisy, targets_noisy, val_inputs_noisy, val_targets_noisy, fit_trajectories_noisy
+    del train_dataset_noisy, val_dataset_noisy, fit_trajectories_noisy, val_trajectories_noisy
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

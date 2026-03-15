@@ -120,3 +120,36 @@ def build_supervised_pairs(
                 targets.append(source_traj[step + 1])
 
     return inputs, targets, stored_trajectories
+
+
+def build_noisy_trajectories(
+    trajectories: List[np.ndarray],
+    config: NSConfig,
+    *,
+    show_progress: bool,
+    progress_desc: str,
+) -> List[np.ndarray]:
+    """Build trajectory-level noisy copies while preserving frame alignment."""
+    noisy_trajectories: List[np.ndarray] = []
+    for trajectory in progress_iter(
+        trajectories,
+        enabled=show_progress,
+        desc=progress_desc,
+        total=len(trajectories),
+    ):
+        traj = np.asarray(trajectory, dtype=np.float32)
+        source_traj = np.empty_like(traj, dtype=np.float32)
+        for step in range(len(traj)):
+            source_traj[step] = np.asarray(
+                add_hf_noise_2d(
+                    traj[step],
+                    config.noise_level,
+                    config.nx,
+                    config.ny,
+                    Lx=config.Lx,
+                    Ly=config.Ly,
+                ),
+                dtype=np.float32,
+            )
+        noisy_trajectories.append(source_traj)
+    return noisy_trajectories

@@ -171,3 +171,42 @@ def build_supervised_pairs_coupled(
                     pair_steps.append(step)
 
     return inputs_u, inputs_v, targets_u, targets_v, pair_steps, trajectory_u, trajectory_v
+
+
+def build_noisy_trajectories_coupled(
+    trajectories: List[Dict[str, np.ndarray]],
+    config: GrayScottConfig,
+    *,
+    show_progress: bool,
+    progress_desc: str,
+) -> List[Dict[str, np.ndarray]]:
+    """Build noisy coupled trajectories while preserving time-step alignment."""
+    noisy_data: List[Dict[str, np.ndarray]] = []
+
+    for data in progress_iter(
+        trajectories,
+        enabled=show_progress,
+        desc=progress_desc,
+        total=len(trajectories),
+    ):
+        u_traj = np.asarray(data["u"], dtype=np.float32)
+        v_traj = np.asarray(data["v"], dtype=np.float32)
+
+        source_u = np.empty_like(u_traj, dtype=np.float32)
+        source_v = np.empty_like(v_traj, dtype=np.float32)
+        for step in range(len(u_traj)):
+            u_noisy_step, v_noisy_step = add_hf_noise_coupled(
+                u_traj[step],
+                v_traj[step],
+                config.noise_level,
+                config.nx,
+                config.ny,
+                Lx=config.Lx,
+                Ly=config.Ly,
+            )
+            source_u[step] = np.asarray(u_noisy_step, dtype=np.float32)
+            source_v[step] = np.asarray(v_noisy_step, dtype=np.float32)
+
+        noisy_data.append({"u": source_u, "v": source_v})
+
+    return noisy_data

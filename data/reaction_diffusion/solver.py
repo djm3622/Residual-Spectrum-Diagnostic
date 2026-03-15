@@ -51,6 +51,7 @@ class GrayScottConfig:
     train_validation_fraction: float = 0.1
     train_checkpoint_every_epochs: int = 20
     train_early_stopping_patience: int = 20
+    train_dataloader_num_workers: int = -1
     train_u_weight: float = 1.35
     train_v_weight: float = 1.0
     train_channel_balance_cap: float = 3.0
@@ -112,6 +113,9 @@ class GrayScottConfig:
             train_validation_fraction=float(training.get("validation_fraction", 0.1)),
             train_checkpoint_every_epochs=int(training.get("checkpoint_every_epochs", 20)),
             train_early_stopping_patience=int(training.get("early_stopping_patience", 20)),
+            train_dataloader_num_workers=int(
+                training.get("dataloader_num_workers", training.get("num_workers", -1))
+            ),
             train_u_weight=float(training.get("u_weight", 1.35)),
             train_v_weight=float(training.get("v_weight", 1.0)),
             train_channel_balance_cap=float(training.get("channel_balance_cap", 3.0)),

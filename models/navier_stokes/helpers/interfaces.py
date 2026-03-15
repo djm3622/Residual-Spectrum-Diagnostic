@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Protocol
 
 import numpy as np
+import torch
+from torch.utils.data import Dataset
 
 
 class OneStepModel(Protocol):
@@ -34,6 +36,9 @@ class OneStepModel(Protocol):
         checkpoint_callback: Callable[[int, float, Dict[str, Any]], None] | None = None,
         early_stopping_patience: int | None = None,
         resume_state: Dict[str, Any] | None = None,
+        train_dataset: Dataset[tuple[torch.Tensor, torch.Tensor]] | None = None,
+        val_dataset: Dataset[tuple[torch.Tensor, torch.Tensor]] | None = None,
+        dataloader_num_workers: int = 0,
         show_progress: bool = False,
         progress_desc: str | None = None,
     ) -> None:

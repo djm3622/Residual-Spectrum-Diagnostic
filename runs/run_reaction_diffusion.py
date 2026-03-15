@@ -34,8 +34,12 @@ from eval.reaction_diffusion import extract_target_frame as _extract_target_fram
 from models.reaction_diffusion import LOSS_CHOICES, build_model, normalize_loss_name, rollout_coupled
 from runs.helpers.common import load_best_checkpoint_for_eval as _load_best_checkpoint_for_eval
 from runs.helpers.common import move_model_device as _move_model_device
+from runs.helpers.indexed_datasets import (
+    ReactionDiffusionIndexedPairDataset as _ReactionDiffusionIndexedPairDataset,
+)
+from runs.helpers.indexed_datasets import resolve_dataloader_num_workers as _resolve_dataloader_num_workers
 from runs.helpers.reaction_diffusion_training import (
-    build_supervised_pairs_coupled as _build_supervised_pairs_coupled,
+    build_noisy_trajectories_coupled as _build_noisy_trajectories_coupled,
 )
 from runs.helpers.reaction_diffusion_training import (
     noisy_reference_frame_coupled as _noisy_reference_frame_coupled,
@@ -141,6 +145,7 @@ def run_single_seed(
     temporal_enabled = bool(temporal_cfg["enabled"])
     temporal_window = int(temporal_cfg["input_steps"])
     temporal_target_mode = str(temporal_cfg["target_mode"])
+    dataloader_workers = _resolve_dataloader_num_workers(config.train_dataloader_num_workers)
     checkpoint_interval = max(1, int(checkpoint_every_epochs))
     resolved_checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir is not None else None
     best_val_tracker: Dict[str, float] = {
@@ -236,59 +241,34 @@ def run_single_seed(
     if not valid_trajectory_steps:
         valid_trajectory_steps = [0, config.n_snapshots - 1]
 
-    (
-        inputs_u,
-        inputs_v,
-        targets_u_clean,
-        targets_v_clean,
-        pair_steps,
-        train_trajectory_u,
-        train_trajectory_v,
-    ) = _build_supervised_pairs_coupled(
+    train_dataset_clean = _ReactionDiffusionIndexedPairDataset(
         fit_train_data,
-        config,
-        temporal_enabled,
-        temporal_window,
-        temporal_target_mode,
-        noisy=False,
-        show_progress=show_data_progress,
-        progress_desc="Build train pairs",
-        return_pair_steps=True,
-        return_trajectories=True,
+        temporal_enabled=temporal_enabled,
+        temporal_window=temporal_window,
+        temporal_target_mode=temporal_target_mode,
     )
-    (
-        val_inputs_u,
-        val_inputs_v,
-        val_targets_u_clean,
-        val_targets_v_clean,
-        _,
-        _,
-        _,
-    ) = _build_supervised_pairs_coupled(
+    val_dataset_clean = _ReactionDiffusionIndexedPairDataset(
         val_data,
-        config,
-        temporal_enabled,
-        temporal_window,
-        temporal_target_mode,
-        noisy=False,
-        show_progress=False,
-        progress_desc="Build validation pairs",
-        return_pair_steps=False,
-        return_trajectories=False,
+        temporal_enabled=temporal_enabled,
+        temporal_window=temporal_window,
+        temporal_target_mode=temporal_target_mode,
     )
+    pair_steps = train_dataset_clean.pair_steps
 
-    if not inputs_u:
+    if len(train_dataset_clean) == 0:
         raise ValueError(
             "No training pairs were generated. "
             f"temporal_enabled={temporal_enabled}, temporal_window={temporal_window}, "
             f"n_snapshots={config.n_snapshots}"
         )
 
-    eval_pair_index = int(np.clip(eval_pair_index, 0, len(inputs_u) - 1))
-    eval_input_u_reference = np.asarray(inputs_u[eval_pair_index], dtype=np.float32)
-    eval_input_v_reference = np.asarray(inputs_v[eval_pair_index], dtype=np.float32)
-    eval_target_u_clean_reference = np.asarray(targets_u_clean[eval_pair_index], dtype=np.float32)
-    eval_target_v_clean_reference = np.asarray(targets_v_clean[eval_pair_index], dtype=np.float32)
+    eval_pair_index = int(np.clip(eval_pair_index, 0, len(train_dataset_clean) - 1))
+    (
+        eval_input_u_reference,
+        eval_input_v_reference,
+        eval_target_u_clean_reference,
+        eval_target_v_clean_reference,
+    ) = train_dataset_clean.get_pair_arrays(eval_pair_index)
 
     model_clean = build_model(
         method,
@@ -304,11 +284,24 @@ def run_single_seed(
     def _clean_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
         _save_checkpoint_event("clean", epoch, val_loss, training_state)
 
+    train_trajectory_u = [np.asarray(item["u"], dtype=np.float32) for item in fit_train_data]
+    train_trajectory_v = [np.asarray(item["v"], dtype=np.float32) for item in fit_train_data]
+    rollout_trajectory_u_clean = (
+        train_trajectory_u
+        if config.train_rollout_weight > 0.0 and config.train_rollout_horizon > 1
+        else None
+    )
+    rollout_trajectory_v_clean = (
+        train_trajectory_v
+        if config.train_rollout_weight > 0.0 and config.train_rollout_horizon > 1
+        else None
+    )
+
     model_clean.train(
-        inputs_u,
-        inputs_v,
-        targets_u_clean,
-        targets_v_clean,
+        inputs_u=[],
+        inputs_v=[],
+        targets_u=[],
+        targets_v=[],
         lr=config.train_lr,
         n_iter=config.train_iterations,
         batch_size=config.train_batch_size,
@@ -318,14 +311,14 @@ def run_single_seed(
         one_cycle_pct_start=config.train_one_cycle_pct_start,
         one_cycle_div_factor=config.train_one_cycle_div_factor,
         one_cycle_final_div_factor=config.train_one_cycle_final_div_factor,
-        trajectory_u=train_trajectory_u,
-        trajectory_v=train_trajectory_v,
+        trajectory_u=rollout_trajectory_u_clean,
+        trajectory_v=rollout_trajectory_v_clean,
         rollout_horizon=config.train_rollout_horizon,
         rollout_weight=config.train_rollout_weight,
-        val_inputs_u=val_inputs_u,
-        val_inputs_v=val_inputs_v,
-        val_targets_u=val_targets_u_clean,
-        val_targets_v=val_targets_v_clean,
+        val_inputs_u=[],
+        val_inputs_v=[],
+        val_targets_u=[],
+        val_targets_v=[],
         pair_steps=pair_steps,
         u_weight=config.train_u_weight,
         v_weight=config.train_v_weight,
@@ -336,6 +329,9 @@ def run_single_seed(
         checkpoint_callback=_clean_checkpoint_callback,
         early_stopping_patience=config.train_early_stopping_patience,
         resume_state=resume_clean_state,
+        train_dataset=train_dataset_clean,
+        val_dataset=val_dataset_clean if len(val_dataset_clean) > 0 else None,
+        dataloader_num_workers=dataloader_workers,
         show_progress=show_training_progress,
         progress_desc="Training clean model",
     )
@@ -358,66 +354,53 @@ def run_single_seed(
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    del inputs_u, inputs_v, targets_u_clean, targets_v_clean
-    del val_inputs_u, val_inputs_v, val_targets_u_clean, val_targets_v_clean
+    del train_dataset_clean, val_dataset_clean
     del train_trajectory_u, train_trajectory_v
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    (
-        inputs_u_noisy,
-        inputs_v_noisy,
-        targets_u_noisy,
-        targets_v_noisy,
-        _,
-        train_trajectory_u_noisy,
-        train_trajectory_v_noisy,
-    ) = _build_supervised_pairs_coupled(
+    fit_train_data_noisy = _build_noisy_trajectories_coupled(
         fit_train_data,
         config,
-        temporal_enabled,
-        temporal_window,
-        temporal_target_mode,
-        noisy=True,
         show_progress=show_data_progress,
-        progress_desc="Build noisy train pairs",
-        return_pair_steps=False,
-        return_trajectories=True,
+        progress_desc="Build noisy train trajectories",
     )
-    (
-        val_inputs_u_noisy,
-        val_inputs_v_noisy,
-        val_targets_u_noisy,
-        val_targets_v_noisy,
-        _,
-        _,
-        _,
-    ) = _build_supervised_pairs_coupled(
+    val_data_noisy = _build_noisy_trajectories_coupled(
         val_data,
         config,
-        temporal_enabled,
-        temporal_window,
-        temporal_target_mode,
-        noisy=True,
         show_progress=False,
-        progress_desc="Build noisy validation pairs",
-        return_pair_steps=False,
-        return_trajectories=False,
+        progress_desc="Build noisy validation trajectories",
     )
-    if not inputs_u_noisy:
+    train_dataset_noisy = _ReactionDiffusionIndexedPairDataset(
+        fit_train_data_noisy,
+        temporal_enabled=temporal_enabled,
+        temporal_window=temporal_window,
+        temporal_target_mode=temporal_target_mode,
+    )
+    val_dataset_noisy = _ReactionDiffusionIndexedPairDataset(
+        val_data_noisy,
+        temporal_enabled=temporal_enabled,
+        temporal_window=temporal_window,
+        temporal_target_mode=temporal_target_mode,
+    )
+    if len(train_dataset_noisy) == 0:
         raise ValueError(
             "No noisy training pairs were generated. "
             f"temporal_enabled={temporal_enabled}, temporal_window={temporal_window}, "
             f"n_snapshots={config.n_snapshots}"
         )
-    if eval_pair_index >= len(inputs_u_noisy):
+    if eval_pair_index >= len(train_dataset_noisy):
         raise ValueError(
             "Noisy training pair count differs from clean training pair count "
-            f"(clean_eval_index={eval_pair_index}, noisy_pairs={len(inputs_u_noisy)})."
+            f"(clean_eval_index={eval_pair_index}, noisy_pairs={len(train_dataset_noisy)})."
         )
-    eval_target_u_noisy_reference = np.asarray(targets_u_noisy[eval_pair_index], dtype=np.float32)
-    eval_target_v_noisy_reference = np.asarray(targets_v_noisy[eval_pair_index], dtype=np.float32)
+    (
+        _,
+        _,
+        eval_target_u_noisy_reference,
+        eval_target_v_noisy_reference,
+    ) = train_dataset_noisy.get_pair_arrays(eval_pair_index)
     n_train_total = len(train_data)
     del fit_train_data, val_data, train_data
     gc.collect()
@@ -438,11 +421,24 @@ def run_single_seed(
     def _noisy_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
         _save_checkpoint_event("noisy", epoch, val_loss, training_state)
 
+    train_trajectory_u_noisy = [np.asarray(item["u"], dtype=np.float32) for item in fit_train_data_noisy]
+    train_trajectory_v_noisy = [np.asarray(item["v"], dtype=np.float32) for item in fit_train_data_noisy]
+    rollout_trajectory_u_noisy = (
+        train_trajectory_u_noisy
+        if config.train_rollout_weight > 0.0 and config.train_rollout_horizon > 1
+        else None
+    )
+    rollout_trajectory_v_noisy = (
+        train_trajectory_v_noisy
+        if config.train_rollout_weight > 0.0 and config.train_rollout_horizon > 1
+        else None
+    )
+
     model_noisy.train(
-        inputs_u_noisy,
-        inputs_v_noisy,
-        targets_u_noisy,
-        targets_v_noisy,
+        inputs_u=[],
+        inputs_v=[],
+        targets_u=[],
+        targets_v=[],
         lr=config.train_lr,
         n_iter=config.train_iterations,
         batch_size=config.train_batch_size,
@@ -452,14 +448,14 @@ def run_single_seed(
         one_cycle_pct_start=config.train_one_cycle_pct_start,
         one_cycle_div_factor=config.train_one_cycle_div_factor,
         one_cycle_final_div_factor=config.train_one_cycle_final_div_factor,
-        trajectory_u=train_trajectory_u_noisy,
-        trajectory_v=train_trajectory_v_noisy,
+        trajectory_u=rollout_trajectory_u_noisy,
+        trajectory_v=rollout_trajectory_v_noisy,
         rollout_horizon=config.train_rollout_horizon,
         rollout_weight=config.train_rollout_weight,
-        val_inputs_u=val_inputs_u_noisy,
-        val_inputs_v=val_inputs_v_noisy,
-        val_targets_u=val_targets_u_noisy,
-        val_targets_v=val_targets_v_noisy,
+        val_inputs_u=[],
+        val_inputs_v=[],
+        val_targets_u=[],
+        val_targets_v=[],
         pair_steps=pair_steps,
         u_weight=config.train_u_weight,
         v_weight=config.train_v_weight,
@@ -470,6 +466,9 @@ def run_single_seed(
         checkpoint_callback=_noisy_checkpoint_callback,
         early_stopping_patience=config.train_early_stopping_patience,
         resume_state=resume_noisy_state,
+        train_dataset=train_dataset_noisy,
+        val_dataset=val_dataset_noisy if len(val_dataset_noisy) > 0 else None,
+        dataloader_num_workers=dataloader_workers,
         show_progress=show_training_progress,
         progress_desc="Training noisy model",
     )
@@ -492,9 +491,9 @@ def run_single_seed(
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    del inputs_u_noisy, inputs_v_noisy, targets_u_noisy, targets_v_noisy
-    del val_inputs_u_noisy, val_inputs_v_noisy, val_targets_u_noisy, val_targets_v_noisy
-    del train_trajectory_u_noisy, train_trajectory_v_noisy, pair_steps
+    del train_dataset_noisy, val_dataset_noisy
+    del train_trajectory_u_noisy, train_trajectory_v_noisy
+    del fit_train_data_noisy, val_data_noisy, pair_steps
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

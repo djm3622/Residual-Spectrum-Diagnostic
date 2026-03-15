@@ -65,6 +65,7 @@ Each YAML controls all run parameters, including:
 - train/test trajectory counts
 - data source selection (`data.external.source`: `generated`, `neuraloperator`, `pdebench`, `fno_mat`)
 - training hyperparameters (`noise_level`, `lr`, `n_iter`, `batch_size`, `grad_clip`, `weight_decay`)
+- dataloader worker count (`training.dataloader_num_workers`; default `-1` = auto multi-core)
 - optional one-cycle learning-rate schedule (`training.use_one_cycle_lr`, `training.one_cycle_pct_start`, `training.one_cycle_div_factor`, `training.one_cycle_final_div_factor`)
 - checkpoint cadence (`training.checkpoint_every_epochs`, default `20`)
 - early stopping patience in epochs (`training.early_stopping_patience`, default `20`; disabled when no validation split)
