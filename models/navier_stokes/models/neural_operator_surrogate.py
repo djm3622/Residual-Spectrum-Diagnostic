@@ -167,8 +167,12 @@ class NeuralOperatorSurrogate2D:
         count = 0
 
         for xb_cpu, yb_cpu in train_loader:
-            xb = xb_cpu.to(self.device, dtype=torch.float32, non_blocking=True)
-            yb = yb_cpu.to(self.device, dtype=torch.float32, non_blocking=True)
+            xb = self._ensure_channel_axis(
+                xb_cpu.to(self.device, dtype=torch.float32, non_blocking=True)
+            )
+            yb = self._ensure_channel_axis(
+                yb_cpu.to(self.device, dtype=torch.float32, non_blocking=True)
+            )
             reduce_dims = tuple(idx for idx in range(xb.ndim) if idx != 1)
             x_batch_sum = torch.sum(xb, dim=reduce_dims, keepdim=True)
             x_batch_sq_sum = torch.sum(xb * xb, dim=reduce_dims, keepdim=True)
@@ -202,6 +206,27 @@ class NeuralOperatorSurrogate2D:
         y_var = torch.clamp((y_sq_sum / denom) - self.target_mean * self.target_mean, min=1e-12)
         self.target_std = torch.sqrt(y_var).to(device=self.device, dtype=torch.float32)
         self.target_std = torch.clamp(self.target_std, min=1e-6)
+
+    def _ensure_channel_axis(self, batch: torch.Tensor) -> torch.Tensor:
+        """Normalize incoming batch shape to [B,1,H,W] or [B,1,T,H,W]."""
+        if self.temporal_enabled:
+            if batch.ndim == 4:
+                return batch.unsqueeze(1)
+            if batch.ndim == 5 and int(batch.shape[1]) == 1:
+                return batch
+            raise ValueError(
+                "Temporal mode expects batch shape [B,T,H,W] or [B,1,T,H,W], "
+                f"got {tuple(batch.shape)}."
+            )
+
+        if batch.ndim == 3:
+            return batch.unsqueeze(1)
+        if batch.ndim == 4 and int(batch.shape[1]) == 1:
+            return batch
+        raise ValueError(
+            "One-step mode expects batch shape [B,H,W] or [B,1,H,W], "
+            f"got {tuple(batch.shape)}."
+        )
 
     def _predict_batch(self, x: torch.Tensor) -> torch.Tensor:
         x_norm = (x - self.input_mean) / self.input_std
@@ -527,8 +552,12 @@ class NeuralOperatorSurrogate2D:
             count = 0
             with torch.inference_mode():
                 for xb_val_cpu, yb_val_cpu in val_loader:
-                    xb_val = xb_val_cpu.to(self.device, non_blocking=True)
-                    yb_val = yb_val_cpu.to(self.device, non_blocking=True)
+                    xb_val = self._ensure_channel_axis(
+                        xb_val_cpu.to(self.device, non_blocking=True)
+                    )
+                    yb_val = self._ensure_channel_axis(
+                        yb_val_cpu.to(self.device, non_blocking=True)
+                    )
                     with train_autocast(self.device):
                         pred_val = self._predict_batch(xb_val)
                         loss_val = self.objective_loss(
@@ -558,8 +587,12 @@ class NeuralOperatorSurrogate2D:
             train_loss_sum = 0.0
             train_loss_count = 0
             for xb_cpu, yb_cpu in train_loader:
-                xb = xb_cpu.to(self.device, non_blocking=True)
-                yb = yb_cpu.to(self.device, non_blocking=True)
+                xb = self._ensure_channel_axis(
+                    xb_cpu.to(self.device, non_blocking=True)
+                )
+                yb = self._ensure_channel_axis(
+                    yb_cpu.to(self.device, non_blocking=True)
+                )
 
                 with train_autocast(self.device):
                     pred = self._predict_batch(xb)
