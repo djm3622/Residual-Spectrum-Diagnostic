@@ -91,14 +91,14 @@ training:
   neural_operator:
     common:
       n_modes:
-      - 36
-      - 36
+      - 32
+      - 32
       hidden_channels: 48
       n_layers: 4
       lifting_channel_ratio: 2.0
       projection_channel_ratio: 2.0
       use_channel_mlp: true
-      channel_mlp_expansion: 0.5
+      channel_mlp_expansion: 4.0
       channel_mlp_dropout: 0.0
       fno_skip: linear
       channel_mlp_skip: soft-gating
@@ -117,7 +117,7 @@ training:
         input_steps: 10
         output_steps: 10
         target_mode: next_block
-        n_modes_time: 36
+        n_modes_time: 5
     fno:
       hidden_channels: 32
       n_layers: 4
