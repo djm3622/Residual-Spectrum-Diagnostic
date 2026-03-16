@@ -120,6 +120,29 @@ def _add_channel_config_kwargs(
     return kwargs
 
 
+def _add_channel_mlp_kwargs(
+    model_cls: Any,
+    kwargs: Dict[str, Any],
+    use_channel_mlp: bool,
+    channel_mlp_dropout: float,
+    channel_mlp_expansion: float,
+    channel_mlp_skip: str,
+) -> Dict[str, Any]:
+    """Populate channel-MLP args across neuralop API variants."""
+    params = _constructor_param_names(model_cls)
+
+    use_key = "use_channel_mlp" if "use_channel_mlp" in params else "use_mlp"
+    dropout_key = "channel_mlp_dropout" if "channel_mlp_dropout" in params else "mlp_dropout"
+    expansion_key = "channel_mlp_expansion" if "channel_mlp_expansion" in params else "mlp_expansion"
+    skip_key = "channel_mlp_skip" if "channel_mlp_skip" in params else "mlp_skip"
+
+    kwargs[use_key] = bool(use_channel_mlp)
+    kwargs[dropout_key] = float(channel_mlp_dropout)
+    kwargs[expansion_key] = float(channel_mlp_expansion)
+    kwargs[skip_key] = str(channel_mlp_skip)
+    return kwargs
+
+
 def resolve_operator_config(operator: str, operator_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """Merge common and operator-specific YAML config for neural operators."""
     merged: Dict[str, Any] = {}
@@ -183,16 +206,20 @@ def build_fno_like_model(
             n_layers=max(1, int(config.get("n_layers", 6))),
             positional_embedding=str(config.get("positional_embedding", "grid")),
             norm=norm,
-            use_channel_mlp=use_channel_mlp,
-            channel_mlp_dropout=channel_mlp_dropout,
-            channel_mlp_expansion=channel_mlp_expansion,
-            channel_mlp_skip=channel_mlp_skip,
             fno_skip=fno_skip,
             domain_padding=domain_padding,
             separable=separable,
             factorization=factorization,
             rank=float(config.get("rank", 1.0)),
             implementation=implementation,
+        )
+        fno_kwargs = _add_channel_mlp_kwargs(
+            FNO,
+            fno_kwargs,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
+            channel_mlp_skip=channel_mlp_skip,
         )
         fno_kwargs = _add_channel_config_kwargs(
             FNO,
@@ -212,16 +239,20 @@ def build_fno_like_model(
             n_layers=max(1, int(config.get("n_layers", 6))),
             positional_embedding=str(config.get("positional_embedding", "grid")),
             norm=norm,
-            use_channel_mlp=use_channel_mlp,
-            channel_mlp_dropout=channel_mlp_dropout,
-            channel_mlp_expansion=channel_mlp_expansion,
-            channel_mlp_skip=channel_mlp_skip,
             fno_skip=fno_skip,
             domain_padding=domain_padding,
             separable=separable,
             factorization=factorization if factorization is not None else "Tucker",
             rank=float(config.get("rank", 0.2)),
             implementation=implementation,
+        )
+        tfno_kwargs = _add_channel_mlp_kwargs(
+            TFNO,
+            tfno_kwargs,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
+            channel_mlp_skip=channel_mlp_skip,
         )
         tfno_kwargs = _add_channel_config_kwargs(
             TFNO,
@@ -273,8 +304,7 @@ def build_fno_like_model(
             for key, value in horizontal_skips_cfg.items():
                 horizontal_skips_map[int(key)] = int(value)
 
-        with io.StringIO() as suppressed, redirect_stdout(suppressed):
-            return UNO(
+        uno_kwargs: Dict[str, Any] = dict(
                 in_channels=in_channels,
                 out_channels=out_channels,
                 hidden_channels=hidden_channels,
@@ -286,19 +316,26 @@ def build_fno_like_model(
                 uno_n_modes=uno_n_modes,
                 uno_scalings=uno_scalings,
                 horizontal_skips_map=horizontal_skips_map,
-                channel_mlp_dropout=channel_mlp_dropout,
-                channel_mlp_expansion=channel_mlp_expansion,
                 norm=norm,
                 preactivation=bool(config.get("preactivation", False)),
                 fno_skip=fno_skip,
                 horizontal_skip=str(config.get("horizontal_skip", "linear")),
-                channel_mlp_skip=uno_channel_mlp_skip,
                 separable=separable,
                 factorization=factorization,
                 rank=float(config.get("rank", 1.0)),
                 implementation=implementation,
                 domain_padding=domain_padding,
                 verbose=bool(config.get("verbose", False)),
-            )
+        )
+        uno_kwargs = _add_channel_mlp_kwargs(
+            UNO,
+            uno_kwargs,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
+            channel_mlp_skip=uno_channel_mlp_skip,
+        )
+        with io.StringIO() as suppressed, redirect_stdout(suppressed):
+            return UNO(**_filtered_ctor_kwargs(UNO, uno_kwargs))
 
     raise ValueError(f"Unsupported neural operator type '{operator}'.")
