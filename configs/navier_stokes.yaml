@@ -97,7 +97,7 @@ training:
       separable: false
       rank: 1.0
     tfno:
-      hidden_channels: 48
+      hidden_channels: 64
       n_layers: 4
       factorization: Tucker
       rank: 1.0

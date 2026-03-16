@@ -93,7 +93,7 @@ training:
       n_modes:
       - 32
       - 32
-      hidden_channels: 48
+      hidden_channels: 64
       n_layers: 4
       lifting_channel_ratio: 2.0
       projection_channel_ratio: 2.0
