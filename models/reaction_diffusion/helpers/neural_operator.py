@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import inspect
+import re
 from contextlib import redirect_stdout
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -87,6 +88,23 @@ def _filtered_ctor_kwargs(model_cls: Any, kwargs: Dict[str, Any]) -> Dict[str, A
     return {key: value for key, value in kwargs.items() if key in supported}
 
 
+def _instantiate_with_unexpected_kwarg_retry(model_cls: Any, kwargs: Dict[str, Any]) -> Any:
+    """Instantiate model while stripping unexpected kwargs reported at runtime."""
+    attempt_kwargs = dict(kwargs)
+    while True:
+        try:
+            return model_cls(**attempt_kwargs)
+        except TypeError as exc:
+            message = str(exc)
+            match = re.search(r"unexpected keyword argument '([^']+)'", message)
+            if match is None:
+                raise
+            bad_key = str(match.group(1))
+            if bad_key not in attempt_kwargs:
+                raise
+            attempt_kwargs.pop(bad_key, None)
+
+
 def _add_channel_config_kwargs(
     model_cls: Any,
     kwargs: Dict[str, Any],
@@ -130,6 +148,20 @@ def _add_channel_mlp_kwargs(
 ) -> Dict[str, Any]:
     """Populate channel-MLP args across neuralop API variants."""
     params = _constructor_param_names(model_cls)
+
+    # Some neuralop releases expose wrapper signatures as (*args, **kwargs),
+    # so static introspection cannot tell which naming convention is active.
+    opaque_signature = len(params) == 0 or params.issubset({"args", "kwargs"})
+    if opaque_signature:
+        kwargs["use_channel_mlp"] = bool(use_channel_mlp)
+        kwargs["use_mlp"] = bool(use_channel_mlp)
+        kwargs["channel_mlp_dropout"] = float(channel_mlp_dropout)
+        kwargs["mlp_dropout"] = float(channel_mlp_dropout)
+        kwargs["channel_mlp_expansion"] = float(channel_mlp_expansion)
+        kwargs["mlp_expansion"] = float(channel_mlp_expansion)
+        kwargs["channel_mlp_skip"] = str(channel_mlp_skip)
+        kwargs["mlp_skip"] = str(channel_mlp_skip)
+        return kwargs
 
     use_key = "use_channel_mlp" if "use_channel_mlp" in params else "use_mlp"
     dropout_key = "channel_mlp_dropout" if "channel_mlp_dropout" in params else "mlp_dropout"
@@ -228,7 +260,7 @@ def build_fno_like_model(
             lifting_ratio=lifting_ratio,
             projection_ratio=projection_ratio,
         )
-        return FNO(**_filtered_ctor_kwargs(FNO, fno_kwargs))
+        return _instantiate_with_unexpected_kwarg_retry(FNO, _filtered_ctor_kwargs(FNO, fno_kwargs))
 
     if operator == "tfno":
         tfno_kwargs: Dict[str, Any] = dict(
@@ -261,7 +293,7 @@ def build_fno_like_model(
             lifting_ratio=lifting_ratio,
             projection_ratio=projection_ratio,
         )
-        return TFNO(**_filtered_ctor_kwargs(TFNO, tfno_kwargs))
+        return _instantiate_with_unexpected_kwarg_retry(TFNO, _filtered_ctor_kwargs(TFNO, tfno_kwargs))
 
     if operator == "uno":
         if len(n_modes) != 2:
@@ -336,6 +368,6 @@ def build_fno_like_model(
             channel_mlp_skip=uno_channel_mlp_skip,
         )
         with io.StringIO() as suppressed, redirect_stdout(suppressed):
-            return UNO(**_filtered_ctor_kwargs(UNO, uno_kwargs))
+            return _instantiate_with_unexpected_kwarg_retry(UNO, _filtered_ctor_kwargs(UNO, uno_kwargs))
 
     raise ValueError(f"Unsupported neural operator type '{operator}'.")

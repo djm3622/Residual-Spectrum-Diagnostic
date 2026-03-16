@@ -16,6 +16,8 @@ run_all_conv_seed1_loss_basis.sh
 batch_ns.sh
 batch_rd.sh
 batch_un.sh
+predict_navier_stokes_validation.py
+visualize_validation_rollouts.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

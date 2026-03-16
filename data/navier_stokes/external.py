@@ -802,7 +802,7 @@ def _extract_fno_mat_trajectory(
 
     slicer = [slice(None)] * 4
     slicer[axis_map["N"]] = int(sample_index)
-    sample = np.asarray(dataset[tuple(slicer)], dtype=np.float32)
+    sample = _safe_read_fno_sample_as_float32(dataset, tuple(slicer))
     if sample.ndim != 3:
         raise ValueError(
             f"Expected one-sample slice to be rank 3, got shape {tuple(sample.shape)} for sample {sample_index}."
@@ -828,6 +828,27 @@ def _extract_fno_mat_trajectory(
             dtype=np.float32,
         )
     return traj
+
+
+def _safe_read_fno_sample_as_float32(dataset: Any, slicer: Tuple[Any, ...]) -> np.ndarray:
+    """Read one FNO sample robustly across h5py dtype-conversion edge cases."""
+    read_direct = getattr(dataset, "read_direct", None)
+    shape = getattr(dataset, "shape", None)
+    if callable(read_direct) and isinstance(shape, tuple) and len(shape) == len(slicer):
+        out_shape: List[int] = []
+        for axis, (sel, dim) in enumerate(zip(slicer, shape)):
+            if isinstance(sel, slice):
+                start, stop, step = sel.indices(int(dim))
+                out_shape.append(len(range(start, stop, step)))
+            else:
+                # Integer indexing removes this axis in the materialized output.
+                if not isinstance(sel, (int, np.integer)):
+                    raise ValueError(f"Unsupported index type at axis {axis}: {type(sel).__name__}")
+        out = np.empty(tuple(out_shape), dtype=np.float32)
+        read_direct(out, source_sel=slicer)
+        return np.asarray(out, dtype=np.float32)
+
+    return np.asarray(dataset[slicer], dtype=np.float32)
 
 
 def _resolve_fno_mat_layout(
