@@ -98,7 +98,7 @@ training:
       rank: 1.0
     tfno:
       hidden_channels: 64
-      n_layers: 4
+      n_layers: 6
       factorization: Tucker
       rank: 1.0
       temporal:

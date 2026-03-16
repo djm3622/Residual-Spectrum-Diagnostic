@@ -80,15 +80,15 @@ training:
   neural_operator:
     common:
       n_modes:
-      - 20
-      - 20
+      - 32
+      - 32
       hidden_channels: 32
       n_layers: 6
       lifting_channel_ratio: 2.0
       projection_channel_ratio: 2.0
       use_channel_mlp: true
-      channel_mlp_expansion: 0.75
-      channel_mlp_dropout: 0.25
+      channel_mlp_expansion: 4.0
+      channel_mlp_dropout: 0.0
       fno_skip: linear
       channel_mlp_skip: soft-gating
       norm: group_norm
@@ -98,15 +98,15 @@ training:
       rank: 1.0
     tfno:
       hidden_channels: 32
-      n_layers: 6
+      n_layers: 4
       factorization: Tucker
-      rank: 0.1
+      rank: 1.0
       temporal:
         enabled: true
         input_steps: 20
         output_steps: 20
         target_mode: next_block
-        n_modes_time: 8
+        n_modes_time: 10
     fno:
       hidden_channels: 32
       n_layers: 4
