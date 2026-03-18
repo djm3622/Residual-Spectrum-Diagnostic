@@ -84,10 +84,10 @@ training:
       - 32
       hidden_channels: 48
       n_layers: 4
-      lifting_channel_ratio: 3.0
-      projection_channel_ratio: 3.0
+      lifting_channel_ratio: 2.0
+      projection_channel_ratio: 2.0
       use_channel_mlp: true
-      channel_mlp_expansion: 10.0
+      channel_mlp_expansion: 8.0
       channel_mlp_dropout: 0.0
       fno_skip: linear
       channel_mlp_skip: soft-gating
