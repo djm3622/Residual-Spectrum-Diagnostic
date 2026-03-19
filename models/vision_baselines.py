@@ -92,7 +92,7 @@ class SCSE2D(nn.Module):
         self.channel_gate = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(ch, hidden, kernel_size=1),
-            nn.Gelu(inplace=True),
+            nn.GELU(inplace=True),
             nn.Conv2d(hidden, ch, kernel_size=1),
             nn.Sigmoid(),
         )
