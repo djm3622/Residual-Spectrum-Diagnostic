@@ -118,12 +118,8 @@ class NeuralOperatorSurrogate2DCoupled:
             my = int(np.clip(my, 2, max_y))
             self.temporal_modes = (mt, mx, my)
             n_modes_override = self.temporal_modes
-        self.temporal_channel_stack = bool(self.temporal_enabled and self.is_uno)
-        if self.temporal_channel_stack:
-            n_modes_override = None
-
-        in_channels = 2 * self.temporal_window if self.temporal_channel_stack else 2
-        out_channels = in_channels
+        in_channels = 2
+        out_channels = 2
         self.net = build_fno_like_model(
             operator=operator,
             in_channels=in_channels,
@@ -275,31 +271,6 @@ class NeuralOperatorSurrogate2DCoupled:
         target_mean = self._stats_for(x, self.target_mean)
         target_std = self._stats_for(x, self.target_std)
         x_norm = (x - input_mean) / input_std
-        if self.temporal_channel_stack:
-            if x_norm.ndim != 5:
-                raise ValueError(
-                    "UNO temporal channel-stack mode expects [B,2,T,H,W] input, "
-                    f"got {tuple(x_norm.shape)}."
-                )
-            batch, channels, n_steps, _, _ = x_norm.shape
-            if int(channels) != 2:
-                raise ValueError(f"Expected 2 channels for coupled input, got {channels}.")
-            x_flat = torch.cat([x_norm[:, 0], x_norm[:, 1]], dim=1)
-            pred_norm_flat = self.net(x_flat)
-            if pred_norm_flat.ndim != 4 or int(pred_norm_flat.shape[1]) != int(2 * n_steps):
-                raise ValueError(
-                    f"Expected UNO temporal output [B,{2 * int(n_steps)},H,W], got {tuple(pred_norm_flat.shape)}."
-                )
-            pred_u = pred_norm_flat[:, :n_steps]
-            pred_v = pred_norm_flat[:, n_steps : 2 * n_steps]
-            pred_norm = torch.stack([pred_u, pred_v], dim=1).reshape(
-                batch,
-                2,
-                n_steps,
-                pred_norm_flat.shape[-2],
-                pred_norm_flat.shape[-1],
-            )
-            return pred_norm * target_std + target_mean
         if self.is_rno:
             pred_norm, _ = self._rno_forward_norm(self._as_rno_sequence(x_norm))
         else:

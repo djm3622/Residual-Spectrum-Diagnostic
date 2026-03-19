@@ -126,33 +126,42 @@ training:
       lifting_channels: 192
       projection_channels: 192
       channel_mlp_skip: linear
+      temporal:
+        enabled: true
+        input_steps: 10
+        output_steps: 10
+        target_mode: next_block
+        n_modes_time: 4
       uno_out_channels:
       - 72
       - 96
       - 96
-      - 96
       - 72
       uno_n_modes:
-      - - 12
+      - - 4
         - 12
-      - - 12
         - 12
-      - - 12
+      - - 4
         - 12
-      - - 12
         - 12
-      - - 12
+      - - 4
+        - 12
+        - 12
+      - - 4
+        - 12
         - 12
       uno_scalings:
       - - 1.0
         - 1.0
+        - 1.0
       - - 0.5
+        - 0.5
         - 0.5
       - - 1.0
         - 1.0
-      - - 1.0
         - 1.0
       - - 2.0
+        - 2.0
         - 2.0
     rno:
       hidden_channels: 48

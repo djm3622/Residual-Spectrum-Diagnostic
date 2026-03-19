@@ -111,25 +111,34 @@ def _normalize_uno_out_channels(value: Any, n_layers: int, hidden_channels: int)
     return values
 
 
-def _normalize_uno_pairs(
+def _normalize_uno_modes(
     value: Any,
     n_layers: int,
-    default_pair: Tuple[float, float],
+    default_modes: Sequence[Any],
     cast: Any,
 ) -> list[list[Any]]:
     n_layers = max(1, int(n_layers))
-    defaults = [cast(default_pair[0]), cast(default_pair[1])]
+    defaults = [cast(item) for item in default_modes]
+    if not defaults:
+        defaults = [cast(1)]
+    n_dim = len(defaults)
     values: list[list[Any]] = []
     if isinstance(value, (list, tuple)):
         for item in value:
-            if isinstance(item, (list, tuple)) and len(item) >= 2:
+            if isinstance(item, (list, tuple)) and len(item) >= 1:
                 try:
-                    values.append([cast(item[0]), cast(item[1])])
+                    row = []
+                    for idx in range(n_dim):
+                        if idx < len(item):
+                            row.append(cast(item[idx]))
+                        else:
+                            row.append(defaults[idx])
+                    values.append(row)
                 except Exception:
                     continue
             elif isinstance(item, (int, float)):
                 cast_item = cast(item)
-                values.append([cast_item, cast_item])
+                values.append([cast_item for _ in range(n_dim)])
     if not values:
         values = [defaults]
     if len(values) < n_layers:
@@ -413,16 +422,16 @@ def build_fno_like_model(
             n_layers=uno_n_layers,
             hidden_channels=hidden_channels,
         )
-        uno_n_modes = _normalize_uno_pairs(
+        uno_n_modes = _normalize_uno_modes(
             config.get("uno_n_modes"),
             n_layers=uno_n_layers,
-            default_pair=(float(n_modes[0]), float(n_modes[1])),
+            default_modes=[float(mode) for mode in n_modes],
             cast=int,
         )
-        uno_scalings = _normalize_uno_pairs(
+        uno_scalings = _normalize_uno_modes(
             config.get("uno_scalings"),
             n_layers=uno_n_layers,
-            default_pair=(1.0, 1.0),
+            default_modes=[1.0 for _ in n_modes],
             cast=float,
         )
         uno_kwargs: Dict[str, Any] = dict(

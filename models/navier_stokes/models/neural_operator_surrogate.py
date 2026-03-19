@@ -118,12 +118,8 @@ class NeuralOperatorSurrogate2D:
             my = int(np.clip(my, 2, max_y))
             self.temporal_modes = (mt, mx, my)
             n_modes_override = self.temporal_modes
-        self.temporal_channel_stack = bool(self.temporal_enabled and self.is_uno)
-        if self.temporal_channel_stack:
-            n_modes_override = None
-
-        in_channels = self.temporal_window if self.temporal_channel_stack else 1
-        out_channels = in_channels
+        in_channels = 1
+        out_channels = 1
         self.net = build_fno_like_model(
             operator=operator,
             in_channels=in_channels,
@@ -284,21 +280,6 @@ class NeuralOperatorSurrogate2D:
 
     def _predict_batch(self, x: torch.Tensor) -> torch.Tensor:
         x_norm = (x - self.input_mean) / self.input_std
-        if self.temporal_channel_stack:
-            if x_norm.ndim != 5 or int(x_norm.shape[1]) != 1:
-                raise ValueError(
-                    "UNO temporal channel-stack mode expects [B,1,T,H,W] input, "
-                    f"got {tuple(x_norm.shape)}."
-                )
-            n_steps = int(x_norm.shape[2])
-            x_flat = x_norm[:, 0]
-            pred_norm_flat = self.net(x_flat)
-            if pred_norm_flat.ndim != 4 or int(pred_norm_flat.shape[1]) != n_steps:
-                raise ValueError(
-                    f"Expected UNO temporal output [B,{n_steps},H,W], got {tuple(pred_norm_flat.shape)}."
-                )
-            pred_norm = pred_norm_flat.unsqueeze(1)
-            return pred_norm * self.target_std + self.target_mean
         if self.is_rno:
             pred_norm, _ = self._rno_forward_norm(self._as_rno_sequence(x_norm))
         else:
