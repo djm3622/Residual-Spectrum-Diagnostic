@@ -63,6 +63,9 @@ class ImplicitTFNO(nn.Module):
         del kwargs  # Kept for API-compatibility with neuralop forward signatures.
 
         output_shapes = self._resolve_output_shapes(output_shape)
+        positional_embedding = getattr(self.backbone, "positional_embedding", None)
+        if positional_embedding is not None:
+            x = positional_embedding(x)
         x = self.backbone.lifting(x)
 
         if self.backbone.domain_padding is not None:
