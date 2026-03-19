@@ -2,27 +2,56 @@
 
 from __future__ import annotations
 
-import io
 import inspect
 import re
-from contextlib import redirect_stdout
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch.nn as nn
 
 try:
-    from neuralop.models import FNO, TFNO, UNO
+    from models.implicit_tfno import ImplicitTFNO
+except Exception:  # pragma: no cover - optional dependency path
+    ImplicitTFNO = None  # type: ignore[assignment]
+
+try:
+    from neuralop.models import TFNO, UNO
 
     _NEURALOP_IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # pragma: no cover - optional dependency path
-    FNO = TFNO = UNO = None  # type: ignore[assignment]
+    TFNO = UNO = None  # type: ignore[assignment]
     _NEURALOP_IMPORT_ERROR = exc
+    ImplicitTFNO = None  # type: ignore[assignment]
+
+try:
+    from neuralop.models import RNO
+except Exception:  # pragma: no cover - optional dependency path
+    RNO = None  # type: ignore[assignment]
 
 
-def require_neuralop() -> None:
+def require_neuralop(operator: str) -> None:
     """Ensure neuraloperator is importable before building NO-based models."""
-    if FNO is not None and TFNO is not None and UNO is not None:
+    normalized = str(operator).strip().lower().replace("-", "_")
+    if normalized == "rno":
+        if RNO is not None:
+            return
+        if _NEURALOP_IMPORT_ERROR is not None:
+            message = (
+                "Method requires the 'neuraloperator' package. "
+                "Install it with: python3 -m pip install neuraloperator"
+            )
+            raise ImportError(f"{message}. Import error: {_NEURALOP_IMPORT_ERROR}") from _NEURALOP_IMPORT_ERROR
+        raise ImportError(
+            "Method 'rno' requires a neuraloperator version that exports neuralop.models.RNO."
+        )
+
+    if normalized in {"tfno", "itfno"}:
+        if TFNO is not None:
+            return
+    elif normalized == "uno":
+        if UNO is not None:
+            return
+    elif TFNO is not None and UNO is not None:
         return
 
     message = (
@@ -186,6 +215,8 @@ def resolve_operator_config(operator: str, operator_config: Optional[Mapping[str
         merged.update(common)
 
     specific = operator_config.get(operator)
+    if not isinstance(specific, Mapping) and operator == "itfno":
+        specific = operator_config.get("tfno")
     if isinstance(specific, Mapping):
         merged.update(specific)
 
@@ -201,8 +232,8 @@ def build_fno_like_model(
     config: Dict[str, Any],
     n_modes_override: Optional[Sequence[int]] = None,
 ) -> nn.Module:
-    """Construct an FNO/TFNO/UNO model from merged config."""
-    require_neuralop()
+    """Construct a TFNO/ITFNO/UNO/RNO model from merged config."""
+    require_neuralop(operator)
 
     modes_x, modes_y = _resolve_modes_2d(config.get("n_modes"), nx=nx, ny=ny, default=20)
     if n_modes_override is None:
@@ -228,39 +259,6 @@ def build_fno_like_model(
     factorization = _normalize_optional_name(config.get("factorization"))
     if isinstance(factorization, str):
         factorization = factorization.strip()
-
-    if operator == "fno":
-        fno_kwargs: Dict[str, Any] = dict(
-            n_modes=n_modes,
-            in_channels=in_channels,
-            out_channels=out_channels,
-            hidden_channels=hidden_channels,
-            n_layers=max(1, int(config.get("n_layers", 6))),
-            positional_embedding=str(config.get("positional_embedding", "grid")),
-            norm=norm,
-            fno_skip=fno_skip,
-            domain_padding=domain_padding,
-            separable=separable,
-            factorization=factorization,
-            rank=float(config.get("rank", 1.0)),
-            implementation=implementation,
-        )
-        fno_kwargs = _add_channel_mlp_kwargs(
-            FNO,
-            fno_kwargs,
-            use_channel_mlp=use_channel_mlp,
-            channel_mlp_dropout=channel_mlp_dropout,
-            channel_mlp_expansion=channel_mlp_expansion,
-            channel_mlp_skip=channel_mlp_skip,
-        )
-        fno_kwargs = _add_channel_config_kwargs(
-            FNO,
-            fno_kwargs,
-            hidden_channels=hidden_channels,
-            lifting_ratio=lifting_ratio,
-            projection_ratio=projection_ratio,
-        )
-        return _instantiate_with_unexpected_kwarg_retry(FNO, _filtered_ctor_kwargs(FNO, fno_kwargs))
 
     if operator == "tfno":
         tfno_kwargs: Dict[str, Any] = dict(
@@ -295,69 +293,66 @@ def build_fno_like_model(
         )
         return _instantiate_with_unexpected_kwarg_retry(TFNO, _filtered_ctor_kwargs(TFNO, tfno_kwargs))
 
+    if operator == "itfno":
+        implicit_cfg = config.get("implicit", {})
+        if not isinstance(implicit_cfg, Mapping):
+            implicit_cfg = {}
+
+        itfno_kwargs: Dict[str, Any] = dict(
+            n_modes=n_modes,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            hidden_channels=hidden_channels,
+            n_layers=max(1, int(config.get("n_layers", 6))),
+            positional_embedding=str(config.get("positional_embedding", "grid")),
+            norm=norm,
+            fno_skip=fno_skip,
+            domain_padding=domain_padding,
+            separable=separable,
+            factorization=factorization if factorization is not None else "Tucker",
+            rank=float(config.get("rank", 0.2)),
+            implementation=implementation,
+            implicit_steps=max(1, int(implicit_cfg.get("steps", config.get("n_layers", 6)))),
+            implicit_dt=float(implicit_cfg.get("dt", 1.0)),
+            implicit_relaxation=bool(implicit_cfg.get("relaxation", True)),
+        )
+        itfno_kwargs = _add_channel_mlp_kwargs(
+            TFNO,
+            itfno_kwargs,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
+            channel_mlp_skip=channel_mlp_skip,
+        )
+        itfno_kwargs = _add_channel_config_kwargs(
+            TFNO,
+            itfno_kwargs,
+            hidden_channels=hidden_channels,
+            lifting_ratio=lifting_ratio,
+            projection_ratio=projection_ratio,
+        )
+        if ImplicitTFNO is None:
+            raise ImportError("Method 'itfno' requires neuraloperator TFNO support.")
+        return _instantiate_with_unexpected_kwarg_retry(
+            ImplicitTFNO,
+            _filtered_ctor_kwargs(ImplicitTFNO, itfno_kwargs),
+        )
+
     if operator == "uno":
-        if len(n_modes) != 2:
-            raise ValueError("UNO currently supports only 2D inputs in this project.")
-        n_layers = max(2, int(config.get("n_layers", 5)))
-        uno_channel_mlp_skip = str(config.get("channel_mlp_skip", "linear"))
-        uno_out_channels = config.get("uno_out_channels")
-        if not isinstance(uno_out_channels, list) or len(uno_out_channels) != n_layers:
-            uno_out_channels = [hidden_channels for _ in range(n_layers)]
-        uno_out_channels = [max(8, int(ch)) for ch in uno_out_channels]
-
-        uno_n_modes = config.get("uno_n_modes")
-        if not isinstance(uno_n_modes, list) or len(uno_n_modes) != n_layers:
-            uno_n_modes = [[modes_x, modes_y] for _ in range(n_layers)]
-        else:
-            parsed_modes: List[List[int]] = []
-            for layer_modes in uno_n_modes:
-                mx, my = _resolve_modes_2d(layer_modes, nx=nx, ny=ny, default=min(modes_x, modes_y))
-                parsed_modes.append([mx, my])
-            uno_n_modes = parsed_modes
-
-        uno_scalings = config.get("uno_scalings")
-        if not isinstance(uno_scalings, list) or len(uno_scalings) != n_layers:
-            uno_scalings = [[1.0, 1.0] for _ in range(n_layers)]
-        else:
-            parsed_scalings: List[List[float]] = []
-            for scale in uno_scalings:
-                if isinstance(scale, (int, float)):
-                    parsed_scalings.append([float(scale), float(scale)])
-                elif isinstance(scale, (list, tuple)) and len(scale) >= 2:
-                    parsed_scalings.append([float(scale[0]), float(scale[1])])
-                else:
-                    parsed_scalings.append([1.0, 1.0])
-            uno_scalings = parsed_scalings
-
-        horizontal_skips_cfg = config.get("horizontal_skips_map")
-        horizontal_skips_map = None
-        if isinstance(horizontal_skips_cfg, Mapping):
-            horizontal_skips_map = {}
-            for key, value in horizontal_skips_cfg.items():
-                horizontal_skips_map[int(key)] = int(value)
-
         uno_kwargs: Dict[str, Any] = dict(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                hidden_channels=hidden_channels,
-                lifting_channels=max(16, int(config.get("lifting_channels", 192))),
-                projection_channels=max(16, int(config.get("projection_channels", 192))),
-                positional_embedding=str(config.get("positional_embedding", "grid")),
-                n_layers=n_layers,
-                uno_out_channels=uno_out_channels,
-                uno_n_modes=uno_n_modes,
-                uno_scalings=uno_scalings,
-                horizontal_skips_map=horizontal_skips_map,
-                norm=norm,
-                preactivation=bool(config.get("preactivation", False)),
-                fno_skip=fno_skip,
-                horizontal_skip=str(config.get("horizontal_skip", "linear")),
-                separable=separable,
-                factorization=factorization,
-                rank=float(config.get("rank", 1.0)),
-                implementation=implementation,
-                domain_padding=domain_padding,
-                verbose=bool(config.get("verbose", False)),
+            n_modes=n_modes,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            hidden_channels=hidden_channels,
+            n_layers=max(1, int(config.get("n_layers", 6))),
+            positional_embedding=str(config.get("positional_embedding", "grid")),
+            norm=norm,
+            fno_skip=fno_skip,
+            domain_padding=domain_padding,
+            separable=separable,
+            factorization=factorization if factorization is not None else "Tucker",
+            rank=float(config.get("rank", 0.2)),
+            implementation=implementation,
         )
         uno_kwargs = _add_channel_mlp_kwargs(
             UNO,
@@ -365,9 +360,50 @@ def build_fno_like_model(
             use_channel_mlp=use_channel_mlp,
             channel_mlp_dropout=channel_mlp_dropout,
             channel_mlp_expansion=channel_mlp_expansion,
-            channel_mlp_skip=uno_channel_mlp_skip,
+            channel_mlp_skip=channel_mlp_skip,
         )
-        with io.StringIO() as suppressed, redirect_stdout(suppressed):
-            return _instantiate_with_unexpected_kwarg_retry(UNO, _filtered_ctor_kwargs(UNO, uno_kwargs))
+        uno_kwargs = _add_channel_config_kwargs(
+            UNO,
+            uno_kwargs,
+            hidden_channels=hidden_channels,
+            lifting_ratio=lifting_ratio,
+            projection_ratio=projection_ratio,
+        )
+        return _instantiate_with_unexpected_kwarg_retry(UNO, _filtered_ctor_kwargs(UNO, uno_kwargs))
+
+    if operator == "rno":
+        rno_kwargs: Dict[str, Any] = dict(
+            n_modes=n_modes,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            hidden_channels=hidden_channels,
+            n_layers=max(1, int(config.get("n_layers", 4))),
+            positional_embedding=str(config.get("positional_embedding", "grid")),
+            norm=norm,
+            fno_skip=fno_skip,
+            domain_padding=domain_padding,
+            separable=separable,
+            factorization=factorization if factorization is not None else "Tucker",
+            rank=float(config.get("rank", 0.2)),
+            implementation=implementation,
+            rno_skip=bool(config.get("rno_skip", False)),
+            return_sequences=bool(config.get("return_sequences", False)),
+        )
+        rno_kwargs = _add_channel_mlp_kwargs(
+            RNO,
+            rno_kwargs,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
+            channel_mlp_skip=channel_mlp_skip,
+        )
+        rno_kwargs = _add_channel_config_kwargs(
+            RNO,
+            rno_kwargs,
+            hidden_channels=hidden_channels,
+            lifting_ratio=lifting_ratio,
+            projection_ratio=projection_ratio,
+        )
+        return _instantiate_with_unexpected_kwarg_retry(RNO, _filtered_ctor_kwargs(RNO, rno_kwargs))
 
     raise ValueError(f"Unsupported neural operator type '{operator}'.")

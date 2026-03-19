@@ -36,25 +36,30 @@ python3 runs/<entry_script>.py <config.yaml> <method> <seed_number> [--device <a
 Examples:
 
 ```bash
-python3 runs/run_navier_stokes.py configs/navier_stokes.yaml conv 1
-python3 runs/run_navier_stokes.py configs/navier_stokes.yaml fno 1 --device cuda
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml tfno 1 --device cuda
+python3 runs/run_navier_stokes.py configs/navier_stokes.yaml itfno 1 --device cuda
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml uno 1 --device cuda
+python3 runs/run_navier_stokes.py configs/navier_stokes.yaml rno 1 --device cuda
+python3 runs/run_navier_stokes.py configs/navier_stokes.yaml swin 1 --device cuda
 python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml tfno 1 --device cuda
-python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml fno 7 --device mps --loss spectral_decay --basis wavelet
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml tfno 7 --device mps
+python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml itfno 7 --device mps
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml uno 7 --device mps
+python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml rno 7 --device mps
+python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml attn_unet 7 --device mps
 ```
 
 ## Method Argument
 
 Supported `method` values:
-- `conv` (aliases: `convolutional`, `spectral`) -> learned one-step conv surrogate
-- `fno` (aliases: `neuralop_fno`, `operator_fno`) -> Fourier Neural Operator (`neuraloperator`)
 - `tfno` (aliases: `neuralop_tfno`, `operator_tfno`) -> Tucker-factorized FNO (`neuraloperator`)
+- `itfno` (aliases: `neuralop_itfno`, `operator_itfno`, `implicit_tfno`) -> implicit iterative TFNO (shared hidden block + fixed-point-style updates)
 - `uno` (aliases: `neuralop_uno`, `operator_uno`) -> U-shaped Neural Operator (`neuraloperator`)
+- `rno` (aliases: `neuralop_rno`, `operator_rno`) -> Recurrent Neural Operator (`neuraloperator`)
+- `conv` (aliases: `convolutional`, `legacy_conv`) -> legacy project conv surrogate
+- `swin` (aliases: `swin_transformer`, `swin_t`) -> Swin-T backbone + dense decoder baseline
+- `attn_unet` (aliases: `attention_unet`, `unet_attn`) -> attention U-Net baseline (SCSE decoder attention)
 - `physics` (aliases: `gray_scott`, `grayscott`) -> explicit physics-only stepper
-- `conv_nn` (aliases: `conv_legacy`, `nn`) -> alias for the learned conv surrogate
 
 ## YAML Controls
 
@@ -73,11 +78,20 @@ Each YAML controls all run parameters, including:
 - validation monitoring split (`training.validation_fraction`) used only for progress reporting
 - coupled-species balancing controls (`training.u_weight`, `training.v_weight`, `training.channel_balance_cap`)
 - transient-tracking controls (`training.dynamics_weight`, `training.early_step_bias`, `training.early_step_decay`)
-- model capacity controls for NS conv surrogate (`training.model_width`, `training.model_depth`)
 - neural-operator controls (`training.neural_operator.common` and per-operator overrides in
-  `training.neural_operator.fno`, `training.neural_operator.tfno`, `training.neural_operator.uno`)
-  - optional temporal-window mode for FNO/TFNO via `training.neural_operator.<op>.temporal`:
+  `training.neural_operator.tfno`, `training.neural_operator.itfno`, `training.neural_operator.uno`, `training.neural_operator.rno`)
+  - optional temporal-window mode for TFNO/ITFNO/UNO via `training.neural_operator.<op>.temporal`:
     `enabled`, `input_steps`, `output_steps` (must equal `input_steps`), `target_mode` (`shifted` or `next_block`), `n_modes_time`
+  - ITFNO fixed-point update controls via `training.neural_operator.itfno.implicit`:
+    `steps`, `dt`, `relaxation`
+  - optional recurrent RNO unroll controls via `training.neural_operator.rno.recurrent`:
+    `n_blocks`, `warmup_steps`
+- baseline-model controls (`training.baseline_models.common` and per-model overrides in
+  `training.baseline_models.swin`, `training.baseline_models.attn_unet`, `training.baseline_models.conv`)
+  - shared options: `norm`, `activation`, `dropout`
+  - `swin` options: `pretrained`, `freeze_backbone`, `decoder_channels`, `use_attention`, `scse_reduction`
+  - `attn_unet` options: `base_channels`, `depth`, `scse_reduction`
+  - `conv` options: NS `model_width`/`model_depth`, RD `width`
 - training objective (`training.loss`: `combined`, `l2`, `l1`, `spectral_decay`, `energy`)
 - progress bars (`progress.enabled`, `progress.data_generation`, `progress.training`, `progress.evaluation`)
   - when training progress is enabled, tqdm shows `train_loss`, `val_loss`, and optimizer `lr` live

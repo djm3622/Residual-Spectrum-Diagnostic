@@ -86,8 +86,6 @@ training:
   rollout_horizon: 10
   rollout_weight: 0.8
   validation_fraction: 0.1
-  model_width: 32
-  model_depth: 5
   neural_operator:
     common:
       n_modes:
@@ -118,15 +116,21 @@ training:
         output_steps: 10
         target_mode: next_block
         n_modes_time: 5
-    fno:
-      hidden_channels: 32
+    itfno:
+      hidden_channels: 48
       n_layers: 4
+      factorization: Tucker
+      rank: 1.0
+      implicit:
+        steps: 8
+        dt: 1.0
+        relaxation: true
       temporal:
         enabled: true
         input_steps: 10
         output_steps: 10
         target_mode: next_block
-        n_modes_time: 6
+        n_modes_time: 5
     uno:
       hidden_channels: 32
       n_layers: 4
@@ -161,6 +165,15 @@ training:
         - 1.0
       - - 2.0
         - 2.0
+    rno:
+      hidden_channels: 48
+      n_layers: 4
+      factorization: Tucker
+      rank: 1.0
+      rno_skip: false
+      recurrent:
+        n_blocks: 4
+        warmup_steps: 4
 progress:
   enabled: true
   data_generation: true

@@ -11,15 +11,18 @@ def normalize_method_name(method: str) -> str:
 
 def resolve_temporal_training_config(method: str, operator_config: Mapping[str, Any] | None) -> Dict[str, Any]:
     normalized_method = normalize_method_name(method)
+    if normalized_method in {"rno", "neuralop_rno", "operator_rno"}:
+        return {"enabled": False, "input_steps": 1, "target_mode": "shifted"}
+
     if normalized_method not in {
-        "fno",
         "tfno",
+        "itfno",
         "uno",
-        "neuralop_fno",
         "neuralop_tfno",
+        "neuralop_itfno",
         "neuralop_uno",
-        "operator_fno",
         "operator_tfno",
+        "operator_itfno",
         "operator_uno",
     }:
         return {"enabled": False, "input_steps": 1, "target_mode": "shifted"}
@@ -28,16 +31,18 @@ def resolve_temporal_training_config(method: str, operator_config: Mapping[str, 
         return {"enabled": False, "input_steps": 1, "target_mode": "shifted"}
 
     common = operator_config.get("common", {})
-    specific_key = "fno"
-    if "tfno" in normalized_method:
-        specific_key = "tfno"
-    elif "uno" in normalized_method:
+    specific_key = "tfno"
+    if "itfno" in normalized_method:
+        specific_key = "itfno"
+    if "uno" in normalized_method:
         specific_key = "uno"
 
     merged: Dict[str, Any] = {}
     if isinstance(common, Mapping):
         merged.update(common)
     specific = operator_config.get(specific_key, {})
+    if specific_key == "itfno" and not isinstance(specific, Mapping):
+        specific = operator_config.get("tfno", {})
     if isinstance(specific, Mapping):
         merged.update(specific)
 

@@ -61,33 +61,30 @@ def build_model(
     config: Optional[GrayScottConfig] = None,
     snapshot_dt: Optional[float] = None,
     operator_config: Optional[Mapping[str, Any]] = None,
+    baseline_config: Optional[Mapping[str, Any]] = None,
 ) -> CoupledOneStepModel:
     """Factory for coupled RD surrogate models selected by CLI method arg."""
     normalized = method.strip().lower().replace("-", "_")
 
-    if normalized in {"conv_nn", "conv_legacy", "convolutional_legacy", "nn"}:
-        return ConvolutionalSurrogate2DCoupled(nx, ny, seed=seed, device=device, loss=loss)
     if normalized in {"physics", "gray_scott", "grayscott", "rd_physics"}:
         if config is None or snapshot_dt is None:
             raise ValueError("Physics RD model requires GrayScottConfig and snapshot_dt.")
         return PhysicsConsistentSurrogate2DCoupled(config=config, snapshot_dt=snapshot_dt, device=device)
-    if normalized in {"conv", "convolutional", "spectral", "nonlinear"}:
-        return ConvolutionalSurrogate2DCoupled(nx, ny, seed=seed, device=device, loss=loss)
-    if normalized in {"fno", "neuralop_fno", "operator_fno"}:
-        return NeuralOperatorSurrogate2DCoupled(
-            nx,
-            ny,
-            operator="fno",
-            seed=seed,
-            device=device,
-            loss=loss,
-            operator_config=operator_config,
-        )
     if normalized in {"tfno", "neuralop_tfno", "operator_tfno"}:
         return NeuralOperatorSurrogate2DCoupled(
             nx,
             ny,
             operator="tfno",
+            seed=seed,
+            device=device,
+            loss=loss,
+            operator_config=operator_config,
+        )
+    if normalized in {"itfno", "implicit_tfno", "neuralop_itfno", "operator_itfno"}:
+        return NeuralOperatorSurrogate2DCoupled(
+            nx,
+            ny,
+            operator="itfno",
             seed=seed,
             device=device,
             loss=loss,
@@ -103,8 +100,48 @@ def build_model(
             loss=loss,
             operator_config=operator_config,
         )
+    if normalized in {"rno", "neuralop_rno", "operator_rno"}:
+        return NeuralOperatorSurrogate2DCoupled(
+            nx,
+            ny,
+            operator="rno",
+            seed=seed,
+            device=device,
+            loss=loss,
+            operator_config=operator_config,
+        )
+    if normalized in {"conv", "convolutional", "legacy_conv"}:
+        return ConvolutionalSurrogate2DCoupled(
+            nx,
+            ny,
+            seed=seed,
+            device=device,
+            loss=loss,
+            architecture="legacy_conv",
+            baseline_config=baseline_config,
+        )
+    if normalized in {"swin", "swin_transformer", "swin_t"}:
+        return ConvolutionalSurrogate2DCoupled(
+            nx,
+            ny,
+            seed=seed,
+            device=device,
+            loss=loss,
+            architecture="swin",
+            baseline_config=baseline_config,
+        )
+    if normalized in {"attn_unet", "attention_unet", "unet_attn"}:
+        return ConvolutionalSurrogate2DCoupled(
+            nx,
+            ny,
+            seed=seed,
+            device=device,
+            loss=loss,
+            architecture="attn_unet",
+            baseline_config=baseline_config,
+        )
 
     raise ValueError(
         "Unsupported method "
-        f"'{method}'. Use one of: conv, fno, tfno, uno, physics, conv_nn"
+        f"'{method}'. Use one of: tfno, itfno, uno, rno, conv, swin, attn_unet, physics"
     )

@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import random
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from models.losses import ObjectiveLoss
+from models.vision_baselines import (
+    SingleChannelFieldWrapper,
+    build_dense_field_model,
+    resolve_baseline_config,
+)
 from utils.progress import progress_range
 from utils.torch_runtime import (
     build_adam_optimizer,
@@ -35,11 +40,14 @@ class ConvolutionalSurrogate2D:
         seed: int | None = None,
         device: str = "auto",
         loss: str = "combined",
+        architecture: str = "legacy_conv",
+        baseline_config: Mapping[str, Any] | None = None,
         model_width: int = 64,
         model_depth: int = 5,
     ):
         self.nx = nx
         self.ny = ny
+        self.architecture = str(architecture).strip().lower().replace("-", "_")
         self.device = resolve_torch_device(device)
         configure_torch_backend(self.device)
         self.grad_scaler = build_grad_scaler(self.device)
@@ -50,9 +58,26 @@ class ConvolutionalSurrogate2D:
             torch.manual_seed(seed)
             np.random.seed(seed)
 
-        width = max(8, int(model_width))
-        depth = max(1, int(model_depth))
-        self.net = NSNonlinearOneStepNet(width=width, depth=depth).to(self.device)
+        resolved_cfg = resolve_baseline_config(self.architecture, baseline_config)
+        if self.architecture in {"legacy_conv", "conv"}:
+            width = max(8, int(resolved_cfg.get("model_width", model_width)))
+            depth = max(1, int(resolved_cfg.get("model_depth", model_depth)))
+            net: torch.nn.Module = NSNonlinearOneStepNet(width=width, depth=depth)
+        elif self.architecture in {"swin", "swin_transformer", "swin_t", "attn_unet", "attention_unet", "unet_attn"}:
+            dense_model = build_dense_field_model(
+                architecture=self.architecture,
+                in_channels=1,
+                out_channels=1,
+                config=resolved_cfg,
+            )
+            net = SingleChannelFieldWrapper(dense_model)
+        else:
+            raise ValueError(
+                f"Unsupported architecture '{architecture}' for ConvolutionalSurrogate2D. "
+                "Use one of: legacy_conv, swin, attn_unet."
+            )
+
+        self.net = net.to(self.device)
         self.net.eval()
 
     def forward(self, omega: np.ndarray) -> np.ndarray:
@@ -378,4 +403,5 @@ class ConvolutionalSurrogate2D:
         payload: Dict[str, np.ndarray] = {}
         for key, tensor in self.net.state_dict().items():
             payload[key] = tensor.detach().cpu().numpy()
+        payload["_architecture"] = np.asarray(self.architecture)
         return payload

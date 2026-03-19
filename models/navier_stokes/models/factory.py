@@ -49,38 +49,27 @@ def build_model(
     seed: int,
     device: str = "auto",
     loss: str = "combined",
-    model_width: int = 64,
-    model_depth: int = 5,
     operator_config: Optional[Mapping[str, Any]] = None,
+    baseline_config: Optional[Mapping[str, Any]] = None,
 ) -> OneStepModel:
     """Factory for NS surrogate models selected by CLI method arg."""
     normalized = method.strip().lower().replace("-", "_")
 
-    if normalized in {"conv", "convolutional", "spectral", "nonlinear"}:
-        return ConvolutionalSurrogate2D(
-            nx,
-            ny,
-            seed=seed,
-            device=device,
-            loss=loss,
-            model_width=model_width,
-            model_depth=model_depth,
-        )
-    if normalized in {"fno", "neuralop_fno", "operator_fno"}:
-        return NeuralOperatorSurrogate2D(
-            nx,
-            ny,
-            operator="fno",
-            seed=seed,
-            device=device,
-            loss=loss,
-            operator_config=operator_config,
-        )
     if normalized in {"tfno", "neuralop_tfno", "operator_tfno"}:
         return NeuralOperatorSurrogate2D(
             nx,
             ny,
             operator="tfno",
+            seed=seed,
+            device=device,
+            loss=loss,
+            operator_config=operator_config,
+        )
+    if normalized in {"itfno", "implicit_tfno", "neuralop_itfno", "operator_itfno"}:
+        return NeuralOperatorSurrogate2D(
+            nx,
+            ny,
+            operator="itfno",
             seed=seed,
             device=device,
             loss=loss,
@@ -96,8 +85,48 @@ def build_model(
             loss=loss,
             operator_config=operator_config,
         )
+    if normalized in {"rno", "neuralop_rno", "operator_rno"}:
+        return NeuralOperatorSurrogate2D(
+            nx,
+            ny,
+            operator="rno",
+            seed=seed,
+            device=device,
+            loss=loss,
+            operator_config=operator_config,
+        )
+    if normalized in {"conv", "convolutional", "legacy_conv"}:
+        return ConvolutionalSurrogate2D(
+            nx,
+            ny,
+            seed=seed,
+            device=device,
+            loss=loss,
+            architecture="legacy_conv",
+            baseline_config=baseline_config,
+        )
+    if normalized in {"swin", "swin_transformer", "swin_t"}:
+        return ConvolutionalSurrogate2D(
+            nx,
+            ny,
+            seed=seed,
+            device=device,
+            loss=loss,
+            architecture="swin",
+            baseline_config=baseline_config,
+        )
+    if normalized in {"attn_unet", "attention_unet", "unet_attn"}:
+        return ConvolutionalSurrogate2D(
+            nx,
+            ny,
+            seed=seed,
+            device=device,
+            loss=loss,
+            architecture="attn_unet",
+            baseline_config=baseline_config,
+        )
 
     raise ValueError(
         "Unsupported method "
-        f"'{method}'. Use one of: conv, fno, tfno, uno"
+        f"'{method}'. Use one of: tfno, itfno, uno, rno, conv, swin, attn_unet"
     )

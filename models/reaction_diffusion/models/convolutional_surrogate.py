@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import random
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, TensorDataset, WeightedRandomSampler
 
 from models.losses import ObjectiveLoss
+from models.vision_baselines import build_dense_field_model, resolve_baseline_config
 from utils.progress import progress_range
 from utils.torch_runtime import (
     build_adam_optimizer,
@@ -35,9 +36,12 @@ class ConvolutionalSurrogate2DCoupled:
         seed: int | None = None,
         device: str = "auto",
         loss: str = "combined",
+        architecture: str = "legacy_conv",
+        baseline_config: Mapping[str, Any] | None = None,
     ):
         self.nx = nx
         self.ny = ny
+        self.architecture = str(architecture).strip().lower().replace("-", "_")
         self.device = resolve_torch_device(device)
         configure_torch_backend(self.device)
         self.grad_scaler = build_grad_scaler(self.device)
@@ -48,7 +52,22 @@ class ConvolutionalSurrogate2DCoupled:
             torch.manual_seed(seed)
             np.random.seed(seed)
 
-        self.net = RDUNetOneStepNet().to(self.device)
+        resolved_cfg = resolve_baseline_config(self.architecture, baseline_config)
+        if self.architecture in {"legacy_conv", "conv"}:
+            width = max(8, int(resolved_cfg.get("width", 48)))
+            self.net = RDUNetOneStepNet(width=width).to(self.device)
+        elif self.architecture in {"swin", "swin_transformer", "swin_t", "attn_unet", "attention_unet", "unet_attn"}:
+            self.net = build_dense_field_model(
+                architecture=self.architecture,
+                in_channels=2,
+                out_channels=2,
+                config=resolved_cfg,
+            ).to(self.device)
+        else:
+            raise ValueError(
+                f"Unsupported architecture '{architecture}' for ConvolutionalSurrogate2DCoupled. "
+                "Use one of: legacy_conv, swin, attn_unet."
+            )
         self.net.eval()
 
     def forward(self, u: np.ndarray, v: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -515,4 +534,5 @@ class ConvolutionalSurrogate2DCoupled:
         payload: Dict[str, np.ndarray] = {}
         for key, tensor in self.net.state_dict().items():
             payload[key] = tensor.detach().cpu().numpy()
+        payload["_architecture"] = np.asarray(self.architecture)
         return payload

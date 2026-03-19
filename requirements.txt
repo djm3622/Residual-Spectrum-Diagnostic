@@ -3,6 +3,7 @@ scipy
 matplotlib
 PyYAML
 torch
+torchvision
 tqdm
 neuraloperator
 h5py

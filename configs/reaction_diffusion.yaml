@@ -107,9 +107,21 @@ training:
         output_steps: 20
         target_mode: next_block
         n_modes_time: 10
-    fno:
+    itfno:
       hidden_channels: 32
       n_layers: 4
+      factorization: Tucker
+      rank: 1.0
+      implicit:
+        steps: 8
+        dt: 1.0
+        relaxation: true
+      temporal:
+        enabled: true
+        input_steps: 20
+        output_steps: 20
+        target_mode: next_block
+        n_modes_time: 10
     uno:
       hidden_channels: 32
       n_layers: 4
@@ -144,6 +156,37 @@ training:
         - 1.0
       - - 2.0
         - 2.0
+    rno:
+      hidden_channels: 32
+      n_layers: 4
+      factorization: Tucker
+      rank: 1.0
+      rno_skip: false
+      recurrent:
+        n_blocks: 4
+        warmup_steps: 4
+  baseline_models:
+    common:
+      norm: group_norm
+      activation: gelu
+      dropout: 0.0
+    conv:
+      width: 48
+    swin:
+      pretrained: false
+      freeze_backbone: false
+      decoder_channels:
+      - 384
+      - 192
+      - 96
+      - 64
+      - 64
+      use_attention: true
+      scse_reduction: 16
+    attn_unet:
+      base_channels: 64
+      depth: 4
+      scse_reduction: 16
 progress:
   enabled: true
   data_generation: true

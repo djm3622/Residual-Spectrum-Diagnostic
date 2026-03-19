@@ -42,6 +42,8 @@ class NeuralOperatorSurrogate2D:
         self.nx = nx
         self.ny = ny
         self.operator = operator
+        normalized_operator = str(operator).strip().lower().replace("-", "_")
+        self.is_rno = normalized_operator == "rno"
         self.device = resolve_torch_device(device)
         configure_torch_backend(self.device)
         self.grad_scaler = build_grad_scaler(self.device)
@@ -60,15 +62,22 @@ class NeuralOperatorSurrogate2D:
         self.temporal_window = 1
         self.temporal_target_mode = "shifted"
         self.temporal_modes: Tuple[int, int, int] | None = None
+        recurrent_cfg = merged_config.get("recurrent")
+        if not isinstance(recurrent_cfg, Mapping):
+            recurrent_cfg = {}
+        self.rno_n_blocks = max(1, int(recurrent_cfg.get("n_blocks", 1)))
+        self.rno_warmup_steps = max(1, int(recurrent_cfg.get("warmup_steps", 1)))
         n_modes_override = None
+        if self.temporal_enabled and self.is_rno:
+            raise ValueError(
+                "RNO uses recurrent.n_blocks training and does not support temporal window mode in this project."
+            )
         if self.temporal_enabled:
-            if operator == "uno":
-                raise ValueError("Temporal window mode is supported for FNO/TFNO, not UNO.")
             self.temporal_window = max(2, int(temporal_cfg.get("input_steps", 20)))
             output_steps = max(2, int(temporal_cfg.get("output_steps", self.temporal_window)))
             if output_steps != self.temporal_window:
                 raise ValueError(
-                    "Current temporal TFNO/FNO path requires output_steps == input_steps "
+                    "Current temporal neural-operator path requires output_steps == input_steps "
                     f"(got input_steps={self.temporal_window}, output_steps={output_steps})."
                 )
             target_mode = str(temporal_cfg.get("target_mode", "shifted")).strip().lower().replace("-", "_")
@@ -228,9 +237,45 @@ class NeuralOperatorSurrogate2D:
             f"got {tuple(batch.shape)}."
         )
 
+    def _as_rno_sequence(self, x: torch.Tensor) -> torch.Tensor:
+        """Convert batch tensors to RNO input shape [B,T,C,H,W]."""
+        if x.ndim == 4 and int(x.shape[1]) == 1:
+            return x.unsqueeze(1)
+        if x.ndim == 5:
+            if int(x.shape[2]) == 1:
+                return x
+            if int(x.shape[1]) == 1:
+                return x.permute(0, 2, 1, 3, 4).contiguous()
+        raise ValueError(
+            "RNO expects [B,1,H,W], [B,1,T,H,W], or [B,T,1,H,W] inputs; "
+            f"got {tuple(x.shape)}."
+        )
+
+    def _rno_forward_norm(
+        self,
+        x_seq_norm: torch.Tensor,
+        hidden_states: List[torch.Tensor] | None = None,
+    ) -> Tuple[torch.Tensor, List[torch.Tensor] | None]:
+        if not self.is_rno:
+            raise RuntimeError("_rno_forward_norm called for non-RNO operator.")
+        try:
+            pred_norm, next_hidden = self.net(
+                x_seq_norm,
+                init_hidden_states=hidden_states,
+                return_hidden_states=True,
+                keep_states_padded=True,
+            )
+            return pred_norm, next_hidden
+        except TypeError:
+            pred_norm = self.net(x_seq_norm)
+            return pred_norm, hidden_states
+
     def _predict_batch(self, x: torch.Tensor) -> torch.Tensor:
         x_norm = (x - self.input_mean) / self.input_std
-        pred_norm = self.net(x_norm)
+        if self.is_rno:
+            pred_norm, _ = self._rno_forward_norm(self._as_rno_sequence(x_norm))
+        else:
+            pred_norm = self.net(x_norm)
         return pred_norm * self.target_std + self.target_mean
 
     def _scaled_state(self, state: torch.Tensor) -> torch.Tensor:
@@ -260,6 +305,21 @@ class NeuralOperatorSurrogate2D:
             return trajectory
 
         if not self.temporal_enabled:
+            if self.is_rno:
+                hidden_states: List[torch.Tensor] | None = None
+                omega = omega0_f32
+                for step in range(1, total_steps):
+                    x = torch.from_numpy(omega[np.newaxis, np.newaxis, ...]).to(self.device)
+                    with torch.inference_mode():
+                        x_norm = (x - self.input_mean) / self.input_std
+                        pred_norm, hidden_states = self._rno_forward_norm(
+                            self._as_rno_sequence(x_norm),
+                            hidden_states=hidden_states,
+                        )
+                        pred = pred_norm * self.target_std + self.target_mean
+                        omega = sanitize_field(pred[0, 0].detach().cpu().numpy())
+                    trajectory[step] = omega
+                return trajectory
             omega = omega0_f32
             for step in range(1, total_steps):
                 omega = sanitize_field(self.forward(omega))
@@ -419,6 +479,7 @@ class NeuralOperatorSurrogate2D:
 
         use_rollout = (
             (not self.temporal_enabled)
+            and (not self.is_rno)
             and rollout_w > 0.0
             and horizon > 1
             and trajectory is not None
@@ -436,6 +497,33 @@ class NeuralOperatorSurrogate2D:
             seq = None
             rollout_batch = 0
             max_start = -1
+
+        use_rno_blocks = (
+            self.is_rno
+            and (not self.temporal_enabled)
+            and self.rno_n_blocks > 1
+            and trajectory is not None
+            and len(trajectory) > 0
+        )
+        if self.is_rno and self.rno_n_blocks > 1 and not use_rno_blocks:
+            raise ValueError(
+                "RNO recurrent.n_blocks > 1 requires full training trajectories in the 'trajectory' argument."
+            )
+        if use_rno_blocks:
+            seq_rno = torch.from_numpy(np.asarray(trajectory, dtype=np.float32))
+            n_rno_traj, n_rno_steps, _, _ = seq_rno.shape
+            max_start_rno = n_rno_steps - self.rno_warmup_steps - self.rno_n_blocks
+            if max_start_rno < 0:
+                raise ValueError(
+                    "RNO recurrent training window is longer than available trajectory length "
+                    f"(n_steps={n_rno_steps}, warmup_steps={self.rno_warmup_steps}, "
+                    f"n_blocks={self.rno_n_blocks})."
+                )
+            rno_block_batch = max(1, min(batch // 2, n_rno_traj))
+        else:
+            seq_rno = None
+            rno_block_batch = 0
+            max_start_rno = -1
 
         optimizer = build_adam_optimizer(
             self.net.parameters(),
@@ -620,7 +708,56 @@ class NeuralOperatorSurrogate2D:
                             state_roll = pred_roll
                         rollout_loss = rollout_loss / float(horizon)
 
-                    loss = one_step_loss + rollout_w * rollout_loss
+                    rno_block_loss = torch.zeros((), device=self.device, dtype=one_step_loss.dtype)
+                    if use_rno_blocks and seq_rno is not None and rno_block_batch > 0:
+                        traj_idx_rno = torch.randint(0, seq_rno.shape[0], (rno_block_batch,))
+                        start_idx_rno = torch.randint(0, max_start_rno + 1, (rno_block_batch,))
+                        warmup_offsets = torch.arange(self.rno_warmup_steps)
+                        warmup_idx = start_idx_rno.unsqueeze(1) + warmup_offsets.unsqueeze(0)
+                        warmup_seq = seq_rno[traj_idx_rno.unsqueeze(1), warmup_idx].to(
+                            self.device,
+                            non_blocking=True,
+                        )
+                        rno_input = warmup_seq.unsqueeze(2)
+                        rno_input_norm = (rno_input - self.input_mean) / self.input_std
+
+                        pred_norm_block, hidden_states = self._rno_forward_norm(rno_input_norm)
+                        pred_block = pred_norm_block * self.target_std + self.target_mean
+                        block_loss_sum = torch.zeros((), device=self.device, dtype=one_step_loss.dtype)
+                        target_idx = start_idx_rno + self.rno_warmup_steps
+                        target_block = seq_rno[traj_idx_rno, target_idx].unsqueeze(1).to(
+                            self.device,
+                            non_blocking=True,
+                        )
+                        block_loss_sum = block_loss_sum + self.objective_loss(
+                            self._scaled_state(pred_block),
+                            self._scaled_state(target_block),
+                        )
+
+                        prev_block = pred_block
+                        for block_idx in range(1, self.rno_n_blocks):
+                            next_input_norm = (prev_block.unsqueeze(1) - self.input_mean) / self.input_std
+                            pred_norm_block, hidden_states = self._rno_forward_norm(
+                                self._as_rno_sequence(next_input_norm),
+                                hidden_states=hidden_states,
+                            )
+                            pred_block = pred_norm_block * self.target_std + self.target_mean
+                            target_idx = start_idx_rno + self.rno_warmup_steps + block_idx
+                            target_block = seq_rno[traj_idx_rno, target_idx].unsqueeze(1).to(
+                                self.device,
+                                non_blocking=True,
+                            )
+                            block_loss_sum = block_loss_sum + self.objective_loss(
+                                self._scaled_state(pred_block),
+                                self._scaled_state(target_block),
+                            )
+                            prev_block = pred_block
+                        rno_block_loss = block_loss_sum / float(self.rno_n_blocks)
+
+                    if use_rno_blocks:
+                        loss = rno_block_loss
+                    else:
+                        loss = one_step_loss + rollout_w * rollout_loss
 
                 if not torch.isfinite(loss):
                     continue

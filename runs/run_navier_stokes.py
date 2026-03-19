@@ -2,7 +2,7 @@
 """Entry script for one Navier-Stokes run.
 
 Usage:
-    python3 runs/run_navier_stokes.py configs/navier_stokes.yaml conv 1 --device auto --loss combined --basis fourier
+    python3 runs/run_navier_stokes.py configs/navier_stokes.yaml tfno 1 --device auto --loss combined --basis fourier
 """
 
 from __future__ import annotations
@@ -60,6 +60,7 @@ def run_single_seed(
     loss: str = "combined",
     basis: str = "fourier",
     operator_config: Mapping[str, Any] | None = None,
+    baseline_config: Mapping[str, Any] | None = None,
     external_data_cfg: ExternalNavierStokesDataConfig | None = None,
     eval_pair_index: int = 0,
     test_case_index: int = 0,
@@ -93,6 +94,8 @@ def run_single_seed(
     temporal_enabled = bool(temporal_cfg["enabled"])
     temporal_window = int(temporal_cfg["input_steps"])
     temporal_target_mode = str(temporal_cfg["target_mode"])
+    normalized_method = str(method).strip().lower().replace("-", "_")
+    is_rno_method = normalized_method in {"rno", "neuralop_rno", "operator_rno"}
     dataloader_workers = _resolve_dataloader_num_workers(config.train_dataloader_num_workers)
     checkpoint_interval = max(1, int(checkpoint_every_epochs))
     resolved_checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir is not None else None
@@ -225,16 +228,15 @@ def run_single_seed(
         seed=seed,
         device=device,
         loss=loss,
-        model_width=config.train_model_width,
-        model_depth=config.train_model_depth,
         operator_config=operator_config,
+        baseline_config=baseline_config,
     )
     def _clean_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
         _save_checkpoint_event("clean", epoch, val_loss, training_state)
 
     rollout_trajectories_clean = (
         fit_trajectories
-        if config.train_rollout_weight > 0.0 and config.train_rollout_horizon > 1
+        if is_rno_method or (config.train_rollout_weight > 0.0 and config.train_rollout_horizon > 1)
         else None
     )
 
@@ -336,16 +338,15 @@ def run_single_seed(
         seed=seed + 10000,
         device=device,
         loss=loss,
-        model_width=config.train_model_width,
-        model_depth=config.train_model_depth,
         operator_config=operator_config,
+        baseline_config=baseline_config,
     )
     def _noisy_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
         _save_checkpoint_event("noisy", epoch, val_loss, training_state)
 
     rollout_trajectories_noisy = (
         fit_trajectories_noisy
-        if config.train_rollout_weight > 0.0 and config.train_rollout_horizon > 1
+        if is_rno_method or (config.train_rollout_weight > 0.0 and config.train_rollout_horizon > 1)
         else None
     )
 
@@ -868,7 +869,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "method",
         type=str,
-        help="Model method (conv, fno, tfno, uno).",
+        help="Model method (tfno, itfno, uno, rno, conv, swin, attn_unet).",
     )
     parser.add_argument("seed", type=int, help="Random seed number")
     parser.add_argument(
@@ -922,6 +923,7 @@ def main() -> None:
     experiment_name = experiment.get("name", "navier_stokes")
     training = raw_config.get("training", {})
     operator_config = training.get("neural_operator", {})
+    baseline_config = training.get("baseline_models", {})
     rsd_cfg = raw_config.get("rsd", {})
     requested_device = args.device if args.device is not None else str(training.get("device", "auto"))
     requested_loss = normalize_loss_name(args.loss if args.loss is not None else str(training.get("loss", "combined")))
@@ -973,6 +975,7 @@ def main() -> None:
         loss=requested_loss,
         basis=requested_basis,
         operator_config=operator_config,
+        baseline_config=baseline_config,
         external_data_cfg=external_data_cfg,
         eval_pair_index=eval_pair_index,
         test_case_index=test_case_index,
