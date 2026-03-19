@@ -74,7 +74,7 @@ def run_single_seed(
     test_trajectories: List[np.ndarray] = data_bundle.test_trajectories
     dt = float(data_bundle.dt)
     n_snapshots = int(data_bundle.n_snapshots)
-    temporal_cfg = _resolve_temporal_training_config(method, operator_config)
+    temporal_cfg = _resolve_temporal_training_config(method, operator_config, baseline_config)
     temporal_enabled = bool(temporal_cfg["enabled"])
     temporal_window = int(temporal_cfg["input_steps"])
     temporal_target_mode = str(temporal_cfg["target_mode"])
@@ -214,6 +214,7 @@ def run_single_seed(
         loss=loss,
         operator_config=operator_config,
         baseline_config=baseline_config,
+        temporal_config=temporal_cfg,
     )
     def _clean_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
         _save_checkpoint_event("clean", epoch, val_loss, training_state)
@@ -324,6 +325,7 @@ def run_single_seed(
         loss=loss,
         operator_config=operator_config,
         baseline_config=baseline_config,
+        temporal_config=temporal_cfg,
     )
     def _noisy_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
         _save_checkpoint_event("noisy", epoch, val_loss, training_state)

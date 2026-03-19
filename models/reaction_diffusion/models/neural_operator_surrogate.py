@@ -38,12 +38,14 @@ class NeuralOperatorSurrogate2DCoupled:
         device: str = "auto",
         loss: str = "combined",
         operator_config: Optional[Mapping[str, Any]] = None,
+        temporal_config: Optional[Mapping[str, Any]] = None,
     ):
         self.nx = nx
         self.ny = ny
         self.operator = operator
         normalized_operator = str(operator).strip().lower().replace("-", "_")
         self.is_rno = normalized_operator == "rno"
+        self.is_uno = normalized_operator == "uno"
         self.device = resolve_torch_device(device)
         configure_torch_backend(self.device)
         self.grad_scaler = build_grad_scaler(self.device)
@@ -55,6 +57,11 @@ class NeuralOperatorSurrogate2DCoupled:
             np.random.seed(seed)
 
         merged_config = resolve_operator_config(operator, operator_config)
+        if isinstance(temporal_config, Mapping):
+            resolved_temporal = dict(temporal_config)
+            if "output_steps" not in resolved_temporal and "input_steps" in resolved_temporal:
+                resolved_temporal["output_steps"] = resolved_temporal["input_steps"]
+            merged_config["temporal"] = resolved_temporal
         temporal_cfg = merged_config.get("temporal")
         self.temporal_enabled = bool(
             isinstance(temporal_cfg, Mapping) and temporal_cfg.get("enabled", False)
@@ -65,7 +72,7 @@ class NeuralOperatorSurrogate2DCoupled:
         recurrent_cfg = merged_config.get("recurrent")
         if not isinstance(recurrent_cfg, Mapping):
             recurrent_cfg = {}
-        self.rno_n_blocks = max(1, int(recurrent_cfg.get("n_blocks", 1)))
+        self.rno_n_blocks = max(2, int(recurrent_cfg.get("n_blocks", 2)))
         self.rno_warmup_steps = max(1, int(recurrent_cfg.get("warmup_steps", 1)))
         n_modes_override = None
         if self.temporal_enabled and self.is_rno:
@@ -111,11 +118,16 @@ class NeuralOperatorSurrogate2DCoupled:
             my = int(np.clip(my, 2, max_y))
             self.temporal_modes = (mt, mx, my)
             n_modes_override = self.temporal_modes
+        self.temporal_channel_stack = bool(self.temporal_enabled and self.is_uno)
+        if self.temporal_channel_stack:
+            n_modes_override = None
 
+        in_channels = 2 * self.temporal_window if self.temporal_channel_stack else 2
+        out_channels = in_channels
         self.net = build_fno_like_model(
             operator=operator,
-            in_channels=2,
-            out_channels=2,
+            in_channels=in_channels,
+            out_channels=out_channels,
             nx=nx,
             ny=ny,
             config=merged_config,
@@ -251,13 +263,48 @@ class NeuralOperatorSurrogate2DCoupled:
             pred_norm = self.net(x_seq_norm)
             return pred_norm, hidden_states
 
+    def _stats_for(self, reference: torch.Tensor, stats: torch.Tensor) -> torch.Tensor:
+        out = stats
+        while out.ndim < reference.ndim:
+            out = out.unsqueeze(2)
+        return out
+
     def _predict_batch(self, x: torch.Tensor) -> torch.Tensor:
-        x_norm = (x - self.input_mean) / self.input_std
+        input_mean = self._stats_for(x, self.input_mean)
+        input_std = self._stats_for(x, self.input_std)
+        target_mean = self._stats_for(x, self.target_mean)
+        target_std = self._stats_for(x, self.target_std)
+        x_norm = (x - input_mean) / input_std
+        if self.temporal_channel_stack:
+            if x_norm.ndim != 5:
+                raise ValueError(
+                    "UNO temporal channel-stack mode expects [B,2,T,H,W] input, "
+                    f"got {tuple(x_norm.shape)}."
+                )
+            batch, channels, n_steps, _, _ = x_norm.shape
+            if int(channels) != 2:
+                raise ValueError(f"Expected 2 channels for coupled input, got {channels}.")
+            x_flat = torch.cat([x_norm[:, 0], x_norm[:, 1]], dim=1)
+            pred_norm_flat = self.net(x_flat)
+            if pred_norm_flat.ndim != 4 or int(pred_norm_flat.shape[1]) != int(2 * n_steps):
+                raise ValueError(
+                    f"Expected UNO temporal output [B,{2 * int(n_steps)},H,W], got {tuple(pred_norm_flat.shape)}."
+                )
+            pred_u = pred_norm_flat[:, :n_steps]
+            pred_v = pred_norm_flat[:, n_steps : 2 * n_steps]
+            pred_norm = torch.stack([pred_u, pred_v], dim=1).reshape(
+                batch,
+                2,
+                n_steps,
+                pred_norm_flat.shape[-2],
+                pred_norm_flat.shape[-1],
+            )
+            return pred_norm * target_std + target_mean
         if self.is_rno:
             pred_norm, _ = self._rno_forward_norm(self._as_rno_sequence(x_norm))
         else:
             pred_norm = self.net(x_norm)
-        return pred_norm * self.target_std + self.target_mean
+        return pred_norm * target_std + target_mean
 
     def predict_window(self, u_window: np.ndarray, v_window: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         if not self.temporal_enabled:
@@ -984,4 +1031,3 @@ def _train_neural_operator_surrogate_2d_coupled(
     if best_state is not None:
         self.net.load_state_dict(best_state)
     self.net.eval()
-

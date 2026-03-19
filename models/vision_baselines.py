@@ -92,7 +92,7 @@ class SCSE2D(nn.Module):
         self.channel_gate = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(ch, hidden, kernel_size=1),
-            nn.GELU(inplace=True),
+            nn.GELU(),
             nn.Conv2d(hidden, ch, kernel_size=1),
             nn.Sigmoid(),
         )
@@ -389,7 +389,7 @@ class SwinDenseFieldModel2D(nn.Module):
 
 
 class SingleChannelFieldWrapper(nn.Module):
-    """Adapter for models consuming [B,1,H,W] and producing [B,1,H,W]."""
+    """Adapter for models consuming [B,C,H,W] and producing [B,C,H,W]."""
 
     def __init__(self, model: nn.Module):
         super().__init__()
@@ -397,13 +397,17 @@ class SingleChannelFieldWrapper(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim == 2:
-            x = x.unsqueeze(0)
-        if x.ndim != 3:
-            raise ValueError(f"Expected [B,H,W] tensor for NS wrapper, got {tuple(x.shape)}.")
-        y = self.model(x.unsqueeze(1))
-        if y.ndim != 4 or int(y.shape[1]) != 1:
+            x = x.unsqueeze(0).unsqueeze(0)
+        elif x.ndim == 3:
+            x = x.unsqueeze(1)
+        elif x.ndim != 4:
+            raise ValueError(f"Expected [B,H,W] or [B,C,H,W] tensor for NS wrapper, got {tuple(x.shape)}.")
+        y = self.model(x)
+        if y.ndim != 4:
             raise ValueError(f"Wrapped model returned unexpected output shape {tuple(y.shape)}.")
-        return y[:, 0]
+        if int(y.shape[1]) == 1:
+            return y[:, 0]
+        return y
 
 
 def resolve_baseline_config(

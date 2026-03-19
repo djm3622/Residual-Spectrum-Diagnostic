@@ -125,8 +125,8 @@ training:
     uno:
       hidden_channels: 32
       n_layers: 4
-      lifting_channels: 224
-      projection_channels: 224
+      lifting_channels: 64
+      projection_channels: 64
       channel_mlp_skip: linear
       uno_out_channels:
       - 80

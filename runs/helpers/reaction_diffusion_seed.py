@@ -122,7 +122,7 @@ def run_single_seed(
             u0, v0 = _sample_initial_condition(solver, config, seed=seed * 1000 + 500 + idx)
             _, u_true, v_true = solver.solve(u0, v0, config.t_final, config.n_snapshots)
             test_cases.append({"u0": u0, "v0": v0, "u_true": u_true, "v_true": v_true})
-    temporal_cfg = _resolve_temporal_training_config(method, operator_config)
+    temporal_cfg = _resolve_temporal_training_config(method, operator_config, baseline_config)
     temporal_enabled = bool(temporal_cfg["enabled"])
     temporal_window = int(temporal_cfg["input_steps"])
     temporal_target_mode = str(temporal_cfg["target_mode"])
@@ -264,6 +264,7 @@ def run_single_seed(
         snapshot_dt=dt,
         operator_config=operator_config,
         baseline_config=baseline_config,
+        temporal_config=temporal_cfg,
     )
     def _clean_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
         _save_checkpoint_event("clean", epoch, val_loss, training_state)
@@ -402,6 +403,7 @@ def run_single_seed(
         snapshot_dt=dt,
         operator_config=operator_config,
         baseline_config=baseline_config,
+        temporal_config=temporal_cfg,
     )
     def _noisy_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
         _save_checkpoint_event("noisy", epoch, val_loss, training_state)

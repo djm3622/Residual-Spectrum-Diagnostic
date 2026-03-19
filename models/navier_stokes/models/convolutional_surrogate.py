@@ -42,6 +42,7 @@ class ConvolutionalSurrogate2D:
         loss: str = "combined",
         architecture: str = "legacy_conv",
         baseline_config: Mapping[str, Any] | None = None,
+        temporal_config: Mapping[str, Any] | None = None,
         model_width: int = 64,
         model_depth: int = 5,
     ):
@@ -53,6 +54,12 @@ class ConvolutionalSurrogate2D:
         self.grad_scaler = build_grad_scaler(self.device)
         self.objective_loss = ObjectiveLoss(nx=nx, ny=ny, device=self.device, loss=loss)
         self.loss_name = self.objective_loss.loss_name
+        temporal_cfg = dict(temporal_config or {})
+        self.temporal_enabled = bool(temporal_cfg.get("enabled", False))
+        self.temporal_window = max(2, int(temporal_cfg.get("input_steps", 20))) if self.temporal_enabled else 1
+        self.temporal_target_mode = str(temporal_cfg.get("target_mode", "next_block")).strip().lower().replace("-", "_")
+        if self.temporal_target_mode not in {"shifted", "next_block"}:
+            self.temporal_target_mode = "next_block"
 
         if seed is not None:
             torch.manual_seed(seed)
@@ -63,11 +70,14 @@ class ConvolutionalSurrogate2D:
             width = max(8, int(resolved_cfg.get("model_width", model_width)))
             depth = max(1, int(resolved_cfg.get("model_depth", model_depth)))
             net: torch.nn.Module = NSNonlinearOneStepNet(width=width, depth=depth)
+            if self.temporal_enabled:
+                self.temporal_enabled = False
         elif self.architecture in {"swin", "swin_transformer", "swin_t", "attn_unet", "attention_unet", "unet_attn"}:
+            io_channels = self.temporal_window if self.temporal_enabled else 1
             dense_model = build_dense_field_model(
                 architecture=self.architecture,
-                in_channels=1,
-                out_channels=1,
+                in_channels=io_channels,
+                out_channels=io_channels,
                 config=resolved_cfg,
             )
             net = SingleChannelFieldWrapper(dense_model)
@@ -80,8 +90,87 @@ class ConvolutionalSurrogate2D:
         self.net = net.to(self.device)
         self.net.eval()
 
+    def _prepare_window(self, omega_window: np.ndarray) -> np.ndarray:
+        arr = np.asarray(omega_window, dtype=np.float32)
+        if arr.ndim == 2:
+            arr = arr[np.newaxis, ...]
+        if arr.ndim != 3:
+            raise ValueError(f"Expected window with shape [T,H,W], got {arr.shape}.")
+        if arr.shape[1:] != (self.nx, self.ny):
+            raise ValueError(
+                f"Window spatial shape mismatch: expected {(self.nx, self.ny)}, got {arr.shape[1:]}."
+            )
+        if arr.shape[0] < self.temporal_window:
+            pad = np.repeat(arr[-1][np.newaxis, ...], self.temporal_window - arr.shape[0], axis=0)
+            arr = np.concatenate([arr, pad], axis=0)
+        elif arr.shape[0] > self.temporal_window:
+            arr = arr[-self.temporal_window :]
+        return np.asarray(arr, dtype=np.float32)
+
+    def predict_window(self, omega_window: np.ndarray) -> np.ndarray:
+        if not self.temporal_enabled:
+            raise ValueError("predict_window is only available when temporal mode is enabled.")
+        window = self._prepare_window(omega_window)
+        x = torch.from_numpy(window[np.newaxis, ...]).to(self.device)
+        with torch.inference_mode():
+            pred = self.net(x)[0].detach().cpu().numpy()
+        if pred.ndim != 3 or int(pred.shape[0]) != self.temporal_window:
+            raise ValueError(
+                f"Expected temporal baseline output [T,H,W] with T={self.temporal_window}, got {pred.shape}."
+            )
+        return np.asarray([sanitize_field(frame) for frame in pred], dtype=np.float32)
+
+    def rollout(self, omega0: np.ndarray, n_steps: int, context: np.ndarray | None = None) -> np.ndarray:
+        total_steps = max(1, int(n_steps))
+        omega0_f32 = sanitize_field(np.asarray(omega0, dtype=np.float32))
+        trajectory = np.zeros((total_steps, self.nx, self.ny), dtype=np.float32)
+        trajectory[0] = omega0_f32
+        if total_steps == 1:
+            return trajectory
+        if not self.temporal_enabled:
+            omega = omega0_f32
+            for step in range(1, total_steps):
+                omega = sanitize_field(self.forward(omega))
+                trajectory[step] = omega
+            return trajectory
+
+        if context is not None:
+            context_arr = np.asarray(context, dtype=np.float32)
+            if context_arr.ndim == 3 and context_arr.shape[0] > 0:
+                window = self._prepare_window(context_arr[: self.temporal_window])
+            else:
+                window = np.repeat(omega0_f32[np.newaxis, ...], self.temporal_window, axis=0)
+        else:
+            window = np.repeat(omega0_f32[np.newaxis, ...], self.temporal_window, axis=0)
+
+        known_steps = min(total_steps, self.temporal_window)
+        trajectory[:known_steps] = window[:known_steps]
+        cursor = known_steps
+        while cursor < total_steps:
+            pred_window = self.predict_window(window)
+            if self.temporal_target_mode == "next_block":
+                take = min(pred_window.shape[0], total_steps - cursor)
+                trajectory[cursor : cursor + take] = pred_window[:take]
+                cursor += take
+                window = pred_window
+            else:
+                next_frame = sanitize_field(pred_window[-1])
+                trajectory[cursor] = next_frame
+                cursor += 1
+                window = np.concatenate([window[1:], next_frame[np.newaxis, ...]], axis=0)
+        return trajectory
+
     def forward(self, omega: np.ndarray) -> np.ndarray:
-        inp = np.asarray(omega, dtype=np.float32)[np.newaxis, ...]
+        omega_arr = np.asarray(omega, dtype=np.float32)
+        if self.temporal_enabled:
+            if omega_arr.ndim == 2:
+                omega_window = np.repeat(omega_arr[np.newaxis, ...], self.temporal_window, axis=0)
+            else:
+                omega_window = self._prepare_window(omega_arr)
+            pred_window = self.predict_window(omega_window)
+            frame = pred_window[0] if self.temporal_target_mode == "next_block" else pred_window[-1]
+            return sanitize_field(frame)
+        inp = omega_arr[np.newaxis, ...]
         x = torch.from_numpy(inp).to(self.device)
         with torch.inference_mode():
             pred = self.net(x)[0].cpu().numpy()
@@ -190,6 +279,22 @@ def _train_convolutional_surrogate_2d(
     else:
         val_loader = None
 
+    def _predict_state(x_state: torch.Tensor) -> torch.Tensor:
+        if self.temporal_enabled:
+            if x_state.ndim != 4:
+                raise ValueError(
+                    "Temporal NS baseline mode expects [B,T,H,W] tensors, "
+                    f"got {tuple(x_state.shape)}."
+                )
+            pred_state = self.net(x_state)
+            if pred_state.ndim != 4 or int(pred_state.shape[1]) != int(x_state.shape[1]):
+                raise ValueError(
+                    "Temporal NS baseline output must preserve [B,T,H,W] shape; "
+                    f"got {tuple(pred_state.shape)} for input {tuple(x_state.shape)}."
+                )
+            return pred_state
+        return self.net(x_state)
+
     clip = max(float(grad_clip), 1e-8)
     wd = max(0.0, float(weight_decay))
     one_cycle_enabled = bool(use_one_cycle_lr)
@@ -209,7 +314,13 @@ def _train_convolutional_surrogate_2d(
     epochs_without_improvement = 0
     best_state: Dict[str, Any] | None = None
 
-    use_rollout = rollout_w > 0.0 and horizon > 1 and trajectory is not None and len(trajectory) > 0
+    use_rollout = (
+        (not self.temporal_enabled)
+        and rollout_w > 0.0
+        and horizon > 1
+        and trajectory is not None
+        and len(trajectory) > 0
+    )
     if use_rollout:
         seq = torch.from_numpy(np.asarray(trajectory, dtype=np.float32)).to(self.device)
         n_traj, n_steps, _, _ = seq.shape
@@ -340,7 +451,7 @@ def _train_convolutional_surrogate_2d(
                 xb_val = xb_val_cpu.to(self.device, non_blocking=True)
                 yb_val = yb_val_cpu.to(self.device, non_blocking=True)
                 with train_autocast(self.device):
-                    pred_val = self.net(xb_val)
+                    pred_val = _predict_state(xb_val)
                     loss_val = self.objective_loss(pred_val, yb_val)
                 if torch.isfinite(loss_val):
                     bs = int(xb_val.shape[0])
@@ -369,7 +480,7 @@ def _train_convolutional_surrogate_2d(
             yb = yb_cpu.to(self.device, non_blocking=True)
 
             with train_autocast(self.device):
-                pred = self.net(xb)
+                pred = _predict_state(xb)
                 one_step_loss = self.objective_loss(pred, yb)
 
                 rollout_loss = torch.zeros((), device=self.device, dtype=one_step_loss.dtype)
@@ -434,4 +545,3 @@ def _train_convolutional_surrogate_2d(
     if best_state is not None:
         self.net.load_state_dict(best_state)
     self.net.eval()
-

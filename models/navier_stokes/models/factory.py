@@ -51,6 +51,7 @@ def build_model(
     loss: str = "combined",
     operator_config: Optional[Mapping[str, Any]] = None,
     baseline_config: Optional[Mapping[str, Any]] = None,
+    temporal_config: Optional[Mapping[str, Any]] = None,
 ) -> OneStepModel:
     """Factory for NS surrogate models selected by CLI method arg."""
     normalized = method.strip().lower().replace("-", "_")
@@ -64,6 +65,7 @@ def build_model(
             device=device,
             loss=loss,
             operator_config=operator_config,
+            temporal_config=temporal_config,
         )
     if normalized in {"itfno", "implicit_tfno", "neuralop_itfno", "operator_itfno"}:
         return NeuralOperatorSurrogate2D(
@@ -74,6 +76,7 @@ def build_model(
             device=device,
             loss=loss,
             operator_config=operator_config,
+            temporal_config=temporal_config,
         )
     if normalized in {"uno", "neuralop_uno", "operator_uno"}:
         return NeuralOperatorSurrogate2D(
@@ -84,6 +87,7 @@ def build_model(
             device=device,
             loss=loss,
             operator_config=operator_config,
+            temporal_config=temporal_config,
         )
     if normalized in {"rno", "neuralop_rno", "operator_rno"}:
         return NeuralOperatorSurrogate2D(
@@ -94,6 +98,7 @@ def build_model(
             device=device,
             loss=loss,
             operator_config=operator_config,
+            temporal_config=temporal_config,
         )
     if normalized in {"conv", "convolutional", "legacy_conv"}:
         return ConvolutionalSurrogate2D(
@@ -104,6 +109,7 @@ def build_model(
             loss=loss,
             architecture="legacy_conv",
             baseline_config=baseline_config,
+            temporal_config=temporal_config,
         )
     if normalized in {"swin", "swin_transformer", "swin_t"}:
         return ConvolutionalSurrogate2D(
@@ -114,6 +120,7 @@ def build_model(
             loss=loss,
             architecture="swin",
             baseline_config=baseline_config,
+            temporal_config=temporal_config,
         )
     if normalized in {"attn_unet", "attention_unet", "unet_attn"}:
         return ConvolutionalSurrogate2D(
@@ -124,6 +131,7 @@ def build_model(
             loss=loss,
             architecture="attn_unet",
             baseline_config=baseline_config,
+            temporal_config=temporal_config,
         )
 
     raise ValueError(

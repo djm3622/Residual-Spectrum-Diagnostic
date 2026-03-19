@@ -91,6 +91,54 @@ def _resolve_modes_2d(value: Any, nx: int, ny: int, default: int = 20) -> Tuple[
     return mx, my
 
 
+def _normalize_uno_out_channels(value: Any, n_layers: int, hidden_channels: int) -> list[int]:
+    n_layers = max(1, int(n_layers))
+    default_value = max(1, int(hidden_channels))
+    if not isinstance(value, (list, tuple)):
+        return [default_value for _ in range(n_layers)]
+    values = []
+    for item in value:
+        try:
+            values.append(max(1, int(item)))
+        except Exception:
+            continue
+    if not values:
+        values = [default_value]
+    if len(values) < n_layers:
+        values.extend([values[-1]] * (n_layers - len(values)))
+    elif len(values) > n_layers:
+        values = values[:n_layers]
+    return values
+
+
+def _normalize_uno_pairs(
+    value: Any,
+    n_layers: int,
+    default_pair: Tuple[float, float],
+    cast: Any,
+) -> list[list[Any]]:
+    n_layers = max(1, int(n_layers))
+    defaults = [cast(default_pair[0]), cast(default_pair[1])]
+    values: list[list[Any]] = []
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                try:
+                    values.append([cast(item[0]), cast(item[1])])
+                except Exception:
+                    continue
+            elif isinstance(item, (int, float)):
+                cast_item = cast(item)
+                values.append([cast_item, cast_item])
+    if not values:
+        values = [defaults]
+    if len(values) < n_layers:
+        values.extend([list(values[-1])] * (n_layers - len(values)))
+    elif len(values) > n_layers:
+        values = values[:n_layers]
+    return values
+
+
 def _constructor_accepts_kwargs(model_cls: Any) -> bool:
     """Whether model constructor has a **kwargs sink."""
     try:
@@ -140,6 +188,8 @@ def _add_channel_config_kwargs(
     hidden_channels: int,
     lifting_ratio: float,
     projection_ratio: float,
+    lifting_channels: Any = None,
+    projection_channels: Any = None,
 ) -> Dict[str, Any]:
     """Populate lifting/projection args in a version-safe way.
 
@@ -149,8 +199,15 @@ def _add_channel_config_kwargs(
     """
     params = _constructor_param_names(model_cls)
 
-    resolved_lifting_channels = max(1, int(round(hidden_channels * max(lifting_ratio, 1e-6))))
-    resolved_projection_channels = max(1, int(round(hidden_channels * max(projection_ratio, 1e-6))))
+    if lifting_channels is None:
+        resolved_lifting_channels = max(1, int(round(hidden_channels * max(lifting_ratio, 1e-6))))
+    else:
+        resolved_lifting_channels = max(1, int(lifting_channels))
+
+    if projection_channels is None:
+        resolved_projection_channels = max(1, int(round(hidden_channels * max(projection_ratio, 1e-6))))
+    else:
+        resolved_projection_channels = max(1, int(projection_channels))
 
     if "lifting_channels" in params:
         kwargs["lifting_channels"] = resolved_lifting_channels
@@ -255,6 +312,8 @@ def build_fno_like_model(
     use_channel_mlp = bool(config.get("use_channel_mlp", True))
     lifting_ratio = float(config.get("lifting_channel_ratio", 2.0))
     projection_ratio = float(config.get("projection_channel_ratio", 2.0))
+    lifting_channels = _normalize_optional_name(config.get("lifting_channels"))
+    projection_channels = _normalize_optional_name(config.get("projection_channels"))
 
     factorization = _normalize_optional_name(config.get("factorization"))
     if isinstance(factorization, str):
@@ -290,6 +349,8 @@ def build_fno_like_model(
             hidden_channels=hidden_channels,
             lifting_ratio=lifting_ratio,
             projection_ratio=projection_ratio,
+            lifting_channels=lifting_channels,
+            projection_channels=projection_channels,
         )
         return _instantiate_with_unexpected_kwarg_retry(TFNO, _filtered_ctor_kwargs(TFNO, tfno_kwargs))
 
@@ -330,6 +391,8 @@ def build_fno_like_model(
             hidden_channels=hidden_channels,
             lifting_ratio=lifting_ratio,
             projection_ratio=projection_ratio,
+            lifting_channels=lifting_channels,
+            projection_channels=projection_channels,
         )
         if ImplicitTFNO is None:
             raise ImportError("Method 'itfno' requires neuraloperator TFNO support.")
@@ -339,12 +402,35 @@ def build_fno_like_model(
         )
 
     if operator == "uno":
+        uno_layers_cfg = max(1, int(config.get("n_layers", 6)))
+        inferred_uno_layers = 0
+        for raw in (config.get("uno_out_channels"), config.get("uno_n_modes"), config.get("uno_scalings")):
+            if isinstance(raw, (list, tuple)) and len(raw) > 0:
+                inferred_uno_layers = max(inferred_uno_layers, len(raw))
+        uno_n_layers = max(1, inferred_uno_layers if inferred_uno_layers > 0 else uno_layers_cfg)
+        uno_out_channels = _normalize_uno_out_channels(
+            config.get("uno_out_channels"),
+            n_layers=uno_n_layers,
+            hidden_channels=hidden_channels,
+        )
+        uno_n_modes = _normalize_uno_pairs(
+            config.get("uno_n_modes"),
+            n_layers=uno_n_layers,
+            default_pair=(float(n_modes[0]), float(n_modes[1])),
+            cast=int,
+        )
+        uno_scalings = _normalize_uno_pairs(
+            config.get("uno_scalings"),
+            n_layers=uno_n_layers,
+            default_pair=(1.0, 1.0),
+            cast=float,
+        )
         uno_kwargs: Dict[str, Any] = dict(
             n_modes=n_modes,
             in_channels=in_channels,
             out_channels=out_channels,
             hidden_channels=hidden_channels,
-            n_layers=max(1, int(config.get("n_layers", 6))),
+            n_layers=uno_n_layers,
             positional_embedding=str(config.get("positional_embedding", "grid")),
             norm=norm,
             fno_skip=fno_skip,
@@ -353,6 +439,9 @@ def build_fno_like_model(
             factorization=factorization if factorization is not None else "Tucker",
             rank=float(config.get("rank", 0.2)),
             implementation=implementation,
+            uno_out_channels=uno_out_channels,
+            uno_n_modes=uno_n_modes,
+            uno_scalings=uno_scalings,
         )
         uno_kwargs = _add_channel_mlp_kwargs(
             UNO,
@@ -368,6 +457,8 @@ def build_fno_like_model(
             hidden_channels=hidden_channels,
             lifting_ratio=lifting_ratio,
             projection_ratio=projection_ratio,
+            lifting_channels=lifting_channels,
+            projection_channels=projection_channels,
         )
         return _instantiate_with_unexpected_kwarg_retry(UNO, _filtered_ctor_kwargs(UNO, uno_kwargs))
 
@@ -403,6 +494,8 @@ def build_fno_like_model(
             hidden_channels=hidden_channels,
             lifting_ratio=lifting_ratio,
             projection_ratio=projection_ratio,
+            lifting_channels=lifting_channels,
+            projection_channels=projection_channels,
         )
         return _instantiate_with_unexpected_kwarg_retry(RNO, _filtered_ctor_kwargs(RNO, rno_kwargs))
 

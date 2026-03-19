@@ -38,6 +38,7 @@ class ConvolutionalSurrogate2DCoupled:
         loss: str = "combined",
         architecture: str = "legacy_conv",
         baseline_config: Mapping[str, Any] | None = None,
+        temporal_config: Mapping[str, Any] | None = None,
     ):
         self.nx = nx
         self.ny = ny
@@ -47,6 +48,12 @@ class ConvolutionalSurrogate2DCoupled:
         self.grad_scaler = build_grad_scaler(self.device)
         self.objective_loss = ObjectiveLoss(nx=nx, ny=ny, device=self.device, loss=loss)
         self.loss_name = self.objective_loss.loss_name
+        temporal_cfg = dict(temporal_config or {})
+        self.temporal_enabled = bool(temporal_cfg.get("enabled", False))
+        self.temporal_window = max(2, int(temporal_cfg.get("input_steps", 20))) if self.temporal_enabled else 1
+        self.temporal_target_mode = str(temporal_cfg.get("target_mode", "next_block")).strip().lower().replace("-", "_")
+        if self.temporal_target_mode not in {"shifted", "next_block"}:
+            self.temporal_target_mode = "next_block"
 
         if seed is not None:
             torch.manual_seed(seed)
@@ -56,11 +63,14 @@ class ConvolutionalSurrogate2DCoupled:
         if self.architecture in {"legacy_conv", "conv"}:
             width = max(8, int(resolved_cfg.get("width", 48)))
             self.net = RDUNetOneStepNet(width=width).to(self.device)
+            if self.temporal_enabled:
+                self.temporal_enabled = False
         elif self.architecture in {"swin", "swin_transformer", "swin_t", "attn_unet", "attention_unet", "unet_attn"}:
+            in_channels = 2 * self.temporal_window if self.temporal_enabled else 2
             self.net = build_dense_field_model(
                 architecture=self.architecture,
-                in_channels=2,
-                out_channels=2,
+                in_channels=in_channels,
+                out_channels=in_channels,
                 config=resolved_cfg,
             ).to(self.device)
         else:
@@ -70,12 +80,131 @@ class ConvolutionalSurrogate2DCoupled:
             )
         self.net.eval()
 
+    def _prepare_window(self, field_window: np.ndarray) -> np.ndarray:
+        arr = np.asarray(field_window, dtype=np.float32)
+        if arr.ndim == 2:
+            arr = arr[np.newaxis, ...]
+        if arr.ndim != 3:
+            raise ValueError(f"Expected window with shape [T,H,W], got {arr.shape}.")
+        if arr.shape[1:] != (self.nx, self.ny):
+            raise ValueError(
+                f"Window spatial shape mismatch: expected {(self.nx, self.ny)}, got {arr.shape[1:]}."
+            )
+        if arr.shape[0] < self.temporal_window:
+            pad = np.repeat(arr[-1][np.newaxis, ...], self.temporal_window - arr.shape[0], axis=0)
+            arr = np.concatenate([arr, pad], axis=0)
+        elif arr.shape[0] > self.temporal_window:
+            arr = arr[-self.temporal_window :]
+        return np.asarray(arr, dtype=np.float32)
+
+    def _stack_windows(self, u_window: np.ndarray, v_window: np.ndarray) -> np.ndarray:
+        # Simple block prediction path for baseline models: append time along channel dim.
+        uw = self._prepare_window(u_window)
+        vw = self._prepare_window(v_window)
+        return np.concatenate([uw, vw], axis=0).astype(np.float32, copy=False)
+
+    def _split_pred_window(self, pred: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        if pred.ndim != 3:
+            raise ValueError(f"Expected prediction tensor [C,H,W], got {pred.shape}.")
+        channels = pred.shape[0]
+        expected = 2 * self.temporal_window
+        if channels != expected:
+            raise ValueError(f"Expected {expected} output channels for temporal block, got {channels}.")
+        pred_u = np.asarray([sanitize_species(frame) for frame in pred[: self.temporal_window]], dtype=np.float32)
+        pred_v = np.asarray([sanitize_species(frame) for frame in pred[self.temporal_window :]], dtype=np.float32)
+        return pred_u, pred_v
+
+    def predict_window(self, u_window: np.ndarray, v_window: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        if not self.temporal_enabled:
+            raise ValueError("predict_window is only available when temporal mode is enabled.")
+        stacked = self._stack_windows(u_window, v_window)[np.newaxis, ...]
+        xb = torch.from_numpy(stacked).to(self.device)
+        with torch.inference_mode():
+            pred = self.net(xb)[0].detach().cpu().numpy()
+        return self._split_pred_window(pred)
+
+    def rollout(
+        self,
+        u0: np.ndarray,
+        v0: np.ndarray,
+        n_steps: int,
+        context_u: np.ndarray | None = None,
+        context_v: np.ndarray | None = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        total_steps = max(1, int(n_steps))
+        u0_f32 = sanitize_species(np.asarray(u0, dtype=np.float32))
+        v0_f32 = sanitize_species(np.asarray(v0, dtype=np.float32))
+        u_traj = np.zeros((total_steps, self.nx, self.ny), dtype=np.float32)
+        v_traj = np.zeros((total_steps, self.nx, self.ny), dtype=np.float32)
+        u_traj[0] = u0_f32
+        v_traj[0] = v0_f32
+        if total_steps == 1:
+            return u_traj, v_traj
+        if not self.temporal_enabled:
+            u_cur = u0_f32
+            v_cur = v0_f32
+            for step in range(1, total_steps):
+                u_cur, v_cur = self.forward(u_cur, v_cur)
+                u_traj[step] = u_cur
+                v_traj[step] = v_cur
+            return u_traj, v_traj
+
+        if (
+            context_u is not None
+            and context_v is not None
+            and np.asarray(context_u).ndim == 3
+            and np.asarray(context_v).ndim == 3
+            and np.asarray(context_u).shape[0] > 0
+            and np.asarray(context_v).shape[0] > 0
+        ):
+            u_window = self._prepare_window(np.asarray(context_u, dtype=np.float32)[: self.temporal_window])
+            v_window = self._prepare_window(np.asarray(context_v, dtype=np.float32)[: self.temporal_window])
+        else:
+            u_window = np.repeat(u0_f32[np.newaxis, ...], self.temporal_window, axis=0)
+            v_window = np.repeat(v0_f32[np.newaxis, ...], self.temporal_window, axis=0)
+
+        known_steps = min(total_steps, self.temporal_window)
+        u_traj[:known_steps] = u_window[:known_steps]
+        v_traj[:known_steps] = v_window[:known_steps]
+        cursor = known_steps
+
+        while cursor < total_steps:
+            pred_u_window, pred_v_window = self.predict_window(u_window, v_window)
+            if self.temporal_target_mode == "next_block":
+                take = min(pred_u_window.shape[0], total_steps - cursor)
+                u_traj[cursor : cursor + take] = pred_u_window[:take]
+                v_traj[cursor : cursor + take] = pred_v_window[:take]
+                cursor += take
+                u_window = pred_u_window
+                v_window = pred_v_window
+            else:
+                next_u = sanitize_species(pred_u_window[-1])
+                next_v = sanitize_species(pred_v_window[-1])
+                u_traj[cursor] = next_u
+                v_traj[cursor] = next_v
+                cursor += 1
+                u_window = np.concatenate([u_window[1:], next_u[np.newaxis, ...]], axis=0)
+                v_window = np.concatenate([v_window[1:], next_v[np.newaxis, ...]], axis=0)
+        return u_traj, v_traj
+
     def forward(self, u: np.ndarray, v: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        x = np.stack([u, v], axis=0).astype(np.float32, copy=False)[np.newaxis, ...]
+        u_arr = np.asarray(u, dtype=np.float32)
+        v_arr = np.asarray(v, dtype=np.float32)
+        if self.temporal_enabled:
+            if u_arr.ndim == 2 and v_arr.ndim == 2:
+                u_window = np.repeat(u_arr[np.newaxis, ...], self.temporal_window, axis=0)
+                v_window = np.repeat(v_arr[np.newaxis, ...], self.temporal_window, axis=0)
+            else:
+                u_window = self._prepare_window(u_arr)
+                v_window = self._prepare_window(v_arr)
+            pred_u_window, pred_v_window = self.predict_window(u_window, v_window)
+            if self.temporal_target_mode == "next_block":
+                return sanitize_species(pred_u_window[0]), sanitize_species(pred_v_window[0])
+            return sanitize_species(pred_u_window[-1]), sanitize_species(pred_v_window[-1])
+        x = np.stack([u_arr, v_arr], axis=0).astype(np.float32, copy=False)[np.newaxis, ...]
         xb = torch.from_numpy(x).to(self.device)
         with torch.inference_mode():
             pred = self.net(xb)[0].cpu().numpy()
-
         u_next = sanitize_species(pred[0])
         v_next = sanitize_species(pred[1])
         return u_next, v_next
@@ -281,10 +410,40 @@ def _train_convolutional_surrogate_2d_coupled(
         device=self.device,
     )
     channel_weight = channel_weight / torch.mean(channel_weight)
-    channel_weight_sqrt = torch.sqrt(channel_weight).view(1, 2, 1, 1)
+    sample_x, _ = train_dataset[0]
+    weight_shape = [1, 2] + [1] * (sample_x.ndim - 1)
+    channel_weight_sqrt = torch.sqrt(channel_weight).view(*weight_shape)
 
     def _scaled_state(state: torch.Tensor) -> torch.Tensor:
         return (state / channel_scale) * channel_weight_sqrt
+
+    def _predict_state(x_state: torch.Tensor) -> torch.Tensor:
+        if self.temporal_enabled:
+            if x_state.ndim != 5:
+                raise ValueError(
+                    "Temporal baseline mode expects [B,2,T,H,W] tensors, "
+                    f"got {tuple(x_state.shape)}."
+                )
+            batch_local, channels_local, time_local, _, _ = x_state.shape
+            if int(channels_local) != 2:
+                raise ValueError(f"Expected 2 channels for coupled temporal input, got {channels_local}.")
+            x_flat = torch.cat([x_state[:, 0], x_state[:, 1]], dim=1)
+            pred_flat = self.net(x_flat)
+            if pred_flat.ndim != 4 or int(pred_flat.shape[1]) != int(2 * time_local):
+                raise ValueError(
+                    "Temporal baseline output must have channel-appended shape "
+                    f"[B,{2 * int(time_local)},H,W]; got {tuple(pred_flat.shape)}."
+                )
+            pred_u = pred_flat[:, :time_local]
+            pred_v = pred_flat[:, time_local : 2 * time_local]
+            return torch.stack([pred_u, pred_v], dim=1).reshape(
+                batch_local,
+                2,
+                time_local,
+                pred_flat.shape[-2],
+                pred_flat.shape[-1],
+            )
+        return self.net(x_state)
 
     clip = max(float(grad_clip), 1e-8)
     wd = max(0.0, float(weight_decay))
@@ -307,6 +466,8 @@ def _train_convolutional_surrogate_2d_coupled(
     best_state: Dict[str, Any] | None = None
 
     use_rollout = (
+        (not self.temporal_enabled)
+        and
         rollout_w > 0.0
         and horizon > 1
         and trajectory_u is not None
@@ -452,7 +613,7 @@ def _train_convolutional_surrogate_2d_coupled(
                 xb_val = xb_val_cpu.to(self.device, non_blocking=True)
                 yb_val = yb_val_cpu.to(self.device, non_blocking=True)
                 with train_autocast(self.device):
-                    pred_val = self.net(xb_val)
+                    pred_val = _predict_state(xb_val)
                     one_step_val = self.objective_loss(
                         _scaled_state(pred_val),
                         _scaled_state(yb_val),
@@ -491,7 +652,7 @@ def _train_convolutional_surrogate_2d_coupled(
             yb = yb_cpu.to(self.device, non_blocking=True)
 
             with train_autocast(self.device):
-                pred = self.net(xb)
+                pred = _predict_state(xb)
                 pred_scaled = _scaled_state(pred)
                 target_scaled = _scaled_state(yb)
                 one_step_loss = self.objective_loss(pred_scaled, target_scaled)
