@@ -145,22 +145,33 @@ def run_single_seed(
         epoch: int,
         val_loss: float,
         training_state: Dict[str, Any],
+        model_architecture: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        return {
+        payload = {
             "format": "training_state_v1",
             "phase": str(model_tag),
             "epoch": int(epoch),
             "val_loss": float(val_loss) if np.isfinite(val_loss) else float("nan"),
             "training_state": training_state,
         }
+        if isinstance(model_architecture, Mapping):
+            payload["model_architecture"] = dict(model_architecture)
+        return payload
 
     def _save_checkpoint_event(
         model_tag: str,
         epoch: int,
         val_loss: float,
         training_state: Dict[str, Any],
+        model_architecture: Mapping[str, Any] | None = None,
     ) -> None:
-        payload = _build_checkpoint_payload(model_tag, epoch, val_loss, training_state)
+        payload = _build_checkpoint_payload(
+            model_tag,
+            epoch,
+            val_loss,
+            training_state,
+            model_architecture=model_architecture,
+        )
         latest_training_state[model_tag] = payload
         if resolved_checkpoint_dir is None:
             return
@@ -266,8 +277,19 @@ def run_single_seed(
         baseline_config=baseline_config,
         temporal_config=temporal_cfg,
     )
+    clean_architecture = (
+        model_clean.describe_architecture()
+        if hasattr(model_clean, "describe_architecture")
+        else {"surrogate_class": model_clean.__class__.__name__}
+    )
     def _clean_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
-        _save_checkpoint_event("clean", epoch, val_loss, training_state)
+        _save_checkpoint_event(
+            "clean",
+            epoch,
+            val_loss,
+            training_state,
+            model_architecture=clean_architecture,
+        )
 
     train_trajectory_u = [np.asarray(item["u"], dtype=np.float32) for item in fit_train_data]
     train_trajectory_v = [np.asarray(item["v"], dtype=np.float32) for item in fit_train_data]
@@ -329,6 +351,7 @@ def run_single_seed(
                 "epoch": int(config.train_iterations),
                 "val_loss": float("nan"),
                 "training_state": {"model_state": model_clean.state_dict()},
+                "model_architecture": clean_architecture,
             }
         else:
             clean_payload = dict(clean_payload)
@@ -405,8 +428,19 @@ def run_single_seed(
         baseline_config=baseline_config,
         temporal_config=temporal_cfg,
     )
+    noisy_architecture = (
+        model_noisy.describe_architecture()
+        if hasattr(model_noisy, "describe_architecture")
+        else {"surrogate_class": model_noisy.__class__.__name__}
+    )
     def _noisy_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
-        _save_checkpoint_event("noisy", epoch, val_loss, training_state)
+        _save_checkpoint_event(
+            "noisy",
+            epoch,
+            val_loss,
+            training_state,
+            model_architecture=noisy_architecture,
+        )
 
     train_trajectory_u_noisy = [np.asarray(item["u"], dtype=np.float32) for item in fit_train_data_noisy]
     train_trajectory_v_noisy = [np.asarray(item["v"], dtype=np.float32) for item in fit_train_data_noisy]
@@ -468,6 +502,7 @@ def run_single_seed(
                 "epoch": int(config.train_iterations),
                 "val_loss": float("nan"),
                 "training_state": {"model_state": model_noisy.state_dict()},
+                "model_architecture": noisy_architecture,
             }
         else:
             noisy_payload = dict(noisy_payload)
@@ -1037,6 +1072,10 @@ def run_single_seed(
             },
         },
         "_resolved_device": str(model_clean.device),
+        "_model_architecture": {
+            "clean": clean_architecture,
+            "noisy": noisy_architecture,
+        },
         "_data": {
             "source": str(data_source),
             "dt": float(dt),

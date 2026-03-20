@@ -22,8 +22,32 @@ from utils.torch_runtime import (
     train_autocast,
 )
 
-from ..helpers.neural_operator import build_fno_like_model, resolve_operator_config
+from ..helpers.neural_operator import (
+    build_fno_like_model,
+    neuralop_runtime_info,
+    resolve_operator_config,
+)
 from ..helpers.sanitization import sanitize_species
+
+
+def _to_jsonable(value: Any) -> Any:
+    """Convert model metadata objects to JSON-safe structures."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _to_jsonable(val) for key, val in value.items()}
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, torch.Tensor):
+        return {
+            "type": "tensor",
+            "shape": list(value.shape),
+            "dtype": str(value.dtype),
+            "device": str(value.device),
+        }
+    return repr(value)
 
 
 class NeuralOperatorSurrogate2DCoupled:
@@ -129,12 +153,46 @@ class NeuralOperatorSurrogate2DCoupled:
             config=merged_config,
             n_modes_override=n_modes_override,
         ).to(self.device)
+        if normalized_operator == "wno":
+            resolved = self.net.__class__.__name__.strip().lower()
+            if resolved != "wno":
+                raise RuntimeError(
+                    "Requested method 'wno' but instantiated model class "
+                    f"'{self.net.__class__.__name__}'."
+                )
         self.grad_scaler = maybe_disable_grad_scaler_for_complex_params(self.grad_scaler, self.net)
         self.input_mean = torch.zeros(1, 2, 1, 1, device=self.device)
         self.input_std = torch.ones(1, 2, 1, 1, device=self.device)
         self.target_mean = torch.zeros(1, 2, 1, 1, device=self.device)
         self.target_std = torch.ones(1, 2, 1, 1, device=self.device)
         self.net.eval()
+
+    def describe_architecture(self) -> Dict[str, Any]:
+        """Summarize the instantiated surrogate/network architecture for artifacts."""
+        param_count = int(sum(parameter.numel() for parameter in self.net.parameters()))
+        trainable_param_count = int(
+            sum(parameter.numel() for parameter in self.net.parameters() if parameter.requires_grad)
+        )
+        init_kwargs = getattr(self.net, "_init_kwargs", None)
+        return {
+            "surrogate_class": self.__class__.__name__,
+            "operator_requested": str(self.operator),
+            "net_class": self.net.__class__.__name__,
+            "is_wno": bool(self.net.__class__.__name__.strip().lower() == "wno"),
+            "temporal": {
+                "enabled": bool(self.temporal_enabled),
+                "window": int(self.temporal_window),
+                "target_mode": str(self.temporal_target_mode),
+                "modes": list(self.temporal_modes) if self.temporal_modes is not None else None,
+            },
+            "grid": {"nx": int(self.nx), "ny": int(self.ny)},
+            "device": str(self.device),
+            "parameter_count": param_count,
+            "trainable_parameter_count": trainable_param_count,
+            "net_init_kwargs": _to_jsonable(init_kwargs) if isinstance(init_kwargs, dict) else None,
+            "neuralop_runtime": neuralop_runtime_info(),
+            "net_repr": str(self.net),
+        }
 
     def _prepare_window(self, field_window: np.ndarray) -> np.ndarray:
         arr = np.asarray(field_window, dtype=np.float32)

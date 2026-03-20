@@ -1,0 +1,6 @@
+[submodule "WNO"]
+	path = WNO
+	url = https://github.com/TapasTripura/WNO.git
+[submodule "neuraloperator"]
+	path = neuraloperator
+	url = https://github.com/neuraloperator/neuraloperator.git

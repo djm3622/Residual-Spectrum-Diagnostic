@@ -129,6 +129,13 @@ class NeuralOperatorSurrogate2D:
             config=merged_config,
             n_modes_override=n_modes_override,
         ).to(self.device)
+        if normalized_operator == "wno":
+            resolved = self.net.__class__.__name__.strip().lower()
+            if resolved != "wno":
+                raise RuntimeError(
+                    "Requested method 'wno' but instantiated model class "
+                    f"'{self.net.__class__.__name__}'."
+                )
         self.grad_scaler = maybe_disable_grad_scaler_for_complex_params(self.grad_scaler, self.net)
         self.input_mean = torch.zeros(1, 1, 1, 1, device=self.device)
         self.input_std = torch.ones(1, 1, 1, 1, device=self.device)

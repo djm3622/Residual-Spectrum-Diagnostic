@@ -134,7 +134,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "method",
         type=str,
-        help="Model method (tfno, itfno, uno, rno, conv, swin, attn_unet, physics).",
+        help="Model method (tfno, itfno, uno, wno, rno, conv, swin, attn_unet, physics).",
     )
     parser.add_argument("seed", type=int, help="Random seed number")
     parser.add_argument(
@@ -280,6 +280,7 @@ def main() -> None:
 
     viz_payload = results.pop("_viz")
     resolved_device = results.pop("_resolved_device")
+    model_architecture = results.pop("_model_architecture", {})
     data_info = results.pop("_data")
 
     summary = {
@@ -293,10 +294,12 @@ def main() -> None:
         "basis": requested_basis,
         "spectral_band_count": requested_spectral_band_count,
         "metrics": results,
+        "model_architecture": model_architecture,
         "viz_indices": viz_payload["indices"],
         "data": data_info,
     }
     save_json(run_out_dir / "results.json", summary)
+    save_json(run_out_dir / "model_architecture.json", model_architecture)
 
     if artifacts.get("save_figures", True):
         _save_standard_figures(
@@ -330,6 +333,7 @@ def main() -> None:
     print(f"Basis: {requested_basis}")
     print(f"Data source: {data_info['source']}")
     print(f"Results: {run_out_dir / 'results.json'}")
+    print(f"Model architecture: {run_out_dir / 'model_architecture.json'}")
     print(f"Checkpoints: {run_ckpt_dir}")
 
 

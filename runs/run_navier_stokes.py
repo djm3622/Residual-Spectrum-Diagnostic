@@ -117,7 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "method",
         type=str,
-        help="Model method (tfno, itfno, uno, rno, conv, swin, attn_unet).",
+        help="Model method (tfno, itfno, uno, wno, rno, conv, swin, attn_unet).",
     )
     parser.add_argument("seed", type=int, help="Random seed number")
     parser.add_argument(

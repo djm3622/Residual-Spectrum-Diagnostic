@@ -2,7 +2,7 @@
 """Entry script for the unsteady_ns case study.
 
 Usage:
-    python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml tfno 1 --device auto --loss l2 --basis fourier
+    python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml wno 1 --device auto --loss l2 --basis fourier
 """
 
 from __future__ import annotations

@@ -39,12 +39,15 @@ Examples:
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml tfno 1 --device cuda
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml itfno 1 --device cuda
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml uno 1 --device cuda
+python3 runs/run_navier_stokes.py configs/navier_stokes.yaml wno 1 --device cuda
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml rno 1 --device cuda
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml swin 1 --device cuda
 python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml tfno 1 --device cuda
+python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml wno 1 --device cuda
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml tfno 7 --device mps
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml itfno 7 --device mps
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml uno 7 --device mps
+python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml wno 7 --device mps
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml rno 7 --device mps
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml attn_unet 7 --device mps
 ```
@@ -55,6 +58,7 @@ Supported `method` values:
 - `tfno` (aliases: `neuralop_tfno`, `operator_tfno`) -> Tucker-factorized FNO (`neuraloperator`)
 - `itfno` (aliases: `neuralop_itfno`, `operator_itfno`, `implicit_tfno`) -> implicit iterative TFNO (shared hidden block + fixed-point-style updates)
 - `uno` (aliases: `neuralop_uno`, `operator_uno`) -> U-shaped Neural Operator (`neuraloperator`)
+- `wno` (aliases: `neuralop_wno`, `operator_wno`) -> Wavelet Neural Operator (`neuraloperator`)
 - `rno` (aliases: `neuralop_rno`, `operator_rno`) -> Recurrent Neural Operator (`neuraloperator`)
 - `conv` (aliases: `convolutional`, `legacy_conv`) -> legacy project conv surrogate
 - `swin` (aliases: `swin_transformer`, `swin_t`) -> Swin-T backbone + dense decoder baseline
@@ -79,9 +83,11 @@ Each YAML controls all run parameters, including:
 - coupled-species balancing controls (`training.u_weight`, `training.v_weight`, `training.channel_balance_cap`)
 - transient-tracking controls (`training.dynamics_weight`, `training.early_step_bias`, `training.early_step_decay`)
 - neural-operator controls (`training.neural_operator.common` and per-operator overrides in
-  `training.neural_operator.tfno`, `training.neural_operator.itfno`, `training.neural_operator.uno`, `training.neural_operator.rno`)
+  `training.neural_operator.tfno`, `training.neural_operator.itfno`, `training.neural_operator.uno`, `training.neural_operator.wno`, `training.neural_operator.rno`)
   - optional temporal-window mode for TFNO/ITFNO/UNO via `training.neural_operator.<op>.temporal`:
     `enabled`, `input_steps`, `output_steps` (must equal `input_steps`), `target_mode` (`shifted` or `next_block`), `n_modes_time`
+  - WNO profile selection via `training.neural_operator.wno.profile`
+    (`rd2d`/`rd3d` in RD configs, `ns2d`/`ns3d` in Navier-Stokes configs)
   - ITFNO fixed-point update controls via `training.neural_operator.itfno.implicit`:
     `steps`, `dt`, `relaxation`
   - optional recurrent RNO unroll controls via `training.neural_operator.rno.recurrent`:
@@ -89,6 +95,10 @@ Each YAML controls all run parameters, including:
 - baseline-model controls (`training.baseline_models.common` and per-model overrides in
   `training.baseline_models.swin`, `training.baseline_models.attn_unet`, `training.baseline_models.conv`)
   - shared options: `norm`, `activation`, `dropout`
+  - optional temporal block mode (`training.baseline_models.<model>.temporal` or `common.temporal`):
+    `enabled`, `input_steps`, `output_steps` (must equal `input_steps`), `target_mode` (`shifted` or `next_block`)
+    - in temporal mode, block timesteps are stacked along channels for Swin/attention-U-Net
+      (NS: `[B,T,H,W]`, RD: `[B,2T,H,W]`)
   - `swin` options: `pretrained`, `freeze_backbone`, `decoder_channels`, `use_attention`, `scse_reduction`
   - `attn_unet` options: `base_channels`, `depth`, `scse_reduction`
   - `conv` options: NS `model_width`/`model_depth`, RD `width`
@@ -210,6 +220,7 @@ When patching config, it updates all NS run-critical fields from processed metad
 
 Each run writes to deterministic paths:
 - `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/results.json`
+- `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/model_architecture.json`
 - `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/summary.png` (if enabled)
 - `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/pde_residual_space_time.png` (if enabled)
 - `output/<experiment>/<method>/loss_<loss>/basis_<basis>/seed_<seed>/boundary_condition_error.png` (if enabled)

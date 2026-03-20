@@ -100,6 +100,17 @@ def build_model(
             operator_config=operator_config,
             temporal_config=temporal_config,
         )
+    if normalized in {"wno", "neuralop_wno", "operator_wno"}:
+        return NeuralOperatorSurrogate2D(
+            nx,
+            ny,
+            operator="wno",
+            seed=seed,
+            device=device,
+            loss=loss,
+            operator_config=operator_config,
+            temporal_config=temporal_config,
+        )
     if normalized in {"conv", "convolutional", "legacy_conv"}:
         return ConvolutionalSurrogate2D(
             nx,
@@ -136,5 +147,5 @@ def build_model(
 
     raise ValueError(
         "Unsupported method "
-        f"'{method}'. Use one of: tfno, itfno, uno, rno, conv, swin, attn_unet"
+        f"'{method}'. Use one of: tfno, itfno, uno, wno, rno, conv, swin, attn_unet"
     )

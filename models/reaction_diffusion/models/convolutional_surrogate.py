@@ -51,6 +51,13 @@ class ConvolutionalSurrogate2DCoupled:
         temporal_cfg = dict(temporal_config or {})
         self.temporal_enabled = bool(temporal_cfg.get("enabled", False))
         self.temporal_window = max(2, int(temporal_cfg.get("input_steps", 20))) if self.temporal_enabled else 1
+        if self.temporal_enabled:
+            output_steps = max(2, int(temporal_cfg.get("output_steps", self.temporal_window)))
+            if output_steps != self.temporal_window:
+                raise ValueError(
+                    "Temporal RD baseline path requires output_steps == input_steps "
+                    f"(got input_steps={self.temporal_window}, output_steps={output_steps})."
+                )
         self.temporal_target_mode = str(temporal_cfg.get("target_mode", "next_block")).strip().lower().replace("-", "_")
         if self.temporal_target_mode not in {"shifted", "next_block"}:
             self.temporal_target_mode = "next_block"

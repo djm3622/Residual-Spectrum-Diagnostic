@@ -23,7 +23,7 @@ data:
   external:
     source: pdebench
     pdebench:
-      file_path: external_data/pdebench/2D/diffusion-reaction/2D_diff-react_NA_NA_64.h5
+      file_path: /Users/davidmillard/Documents/Projects/RSD_home/Residual-Spectrum-Diagnostic/external_data/pdebench/2D/diffusion-reaction/2D_diff-react_NA_NA.h5
       dataset_key: data
       layout: THWC
       channel_index: 0
@@ -165,6 +165,36 @@ training:
       - - 2.0
         - 2.0
         - 2.0
+    wno:
+      # Switch profile to rd3d to run temporal next-block WNO (T x H x W operator).
+      profile: rd2d
+      wavelet: db4
+      wavelet_transform: dwt
+      use_channel_mlp: false
+      profiles:
+        rd2d:
+          n_modes:
+          - 32
+          - 32
+          blocks: 4
+          wavelet_levels: 2
+          wavelet_mode: symmetric
+          temporal:
+            enabled: false
+        rd3d:
+          n_modes:
+          - 10
+          - 32
+          - 32
+          blocks: 4
+          wavelet_levels: 2
+          wavelet_mode: periodic
+          temporal:
+            enabled: true
+            input_steps: 20
+            output_steps: 20
+            target_mode: next_block
+            n_modes_time: 10
     rno:
       hidden_channels: 32
       n_layers: 4
@@ -179,17 +209,22 @@ training:
       norm: group_norm
       activation: gelu
       dropout: 0.0
+      temporal:
+        enabled: true
+        input_steps: 20
+        output_steps: 20
+        target_mode: next_block
     conv:
       width: 48
+      model_depth: 4
     swin:
       pretrained: false
       freeze_backbone: false
       decoder_channels:
-      - 384
-      - 192
-      - 96
+      - 128
       - 64
-      - 64
+      - 32
+      - 32
       use_attention: true
       scse_reduction: 16
     attn_unet:

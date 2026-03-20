@@ -10,6 +10,7 @@ std_out/
 external_data/*
 .mplcache/
 evaluatin/
+plans/
 
 # files
 run_all_conv_seed1_loss_basis.sh

@@ -4,10 +4,24 @@ from __future__ import annotations
 
 import inspect
 import re
+import sys
+from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch.nn as nn
+
+# Prefer the local neuraloperator clone when present so this repo can train
+# against in-progress operators (e.g. WNO) without requiring a pip release.
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_LOCAL_NEURALOP_PATH = _PROJECT_ROOT / "external" / "neuraloperator"
+_NEURALOP_IMPORT_SOURCE = "site-packages"
+if _LOCAL_NEURALOP_PATH.exists():
+    _local_path_str = str(_LOCAL_NEURALOP_PATH)
+    if _local_path_str in sys.path:
+        sys.path.remove(_local_path_str)
+    sys.path.insert(0, _local_path_str)
+    _NEURALOP_IMPORT_SOURCE = _local_path_str
 
 try:
     from models.implicit_tfno import ImplicitTFNO
@@ -27,10 +41,43 @@ try:
 except Exception:  # pragma: no cover - optional dependency path
     RNO = None  # type: ignore[assignment]
 
+try:
+    from neuralop.models import WNO
+except Exception:  # pragma: no cover - optional dependency path
+    WNO = None  # type: ignore[assignment]
+
+
+def neuralop_runtime_info() -> Dict[str, Any]:
+    """Report which neuraloperator source/model exports are available at runtime."""
+    models_module = sys.modules.get("neuralop.models")
+    resolved_models_path = getattr(models_module, "__file__", None)
+    return {
+        "import_source": _NEURALOP_IMPORT_SOURCE,
+        "local_clone_path": str(_LOCAL_NEURALOP_PATH),
+        "resolved_models_module": str(resolved_models_path) if resolved_models_path is not None else None,
+        "has_tfno": bool(TFNO is not None),
+        "has_uno": bool(UNO is not None),
+        "has_rno": bool(RNO is not None),
+        "has_wno": bool(WNO is not None),
+    }
+
 
 def require_neuralop(operator: str) -> None:
     """Ensure neuraloperator is importable before building NO-based models."""
     normalized = str(operator).strip().lower().replace("-", "_")
+    if normalized == "wno":
+        if WNO is not None:
+            return
+        if _NEURALOP_IMPORT_ERROR is not None:
+            message = (
+                "Method requires the 'neuraloperator' package. "
+                "Install it with: python3 -m pip install neuraloperator"
+            )
+            raise ImportError(f"{message}. Import error: {_NEURALOP_IMPORT_ERROR}") from _NEURALOP_IMPORT_ERROR
+        raise ImportError(
+            "Method 'wno' requires a neuraloperator build that exports neuralop.models.WNO."
+        )
+
     if normalized == "rno":
         if RNO is not None:
             return
@@ -269,6 +316,27 @@ def _add_channel_mlp_kwargs(
     return kwargs
 
 
+def _merge_operator_section(
+    merged: Dict[str, Any],
+    section: Any,
+) -> None:
+    """Merge operator section and optional profile override."""
+    if not isinstance(section, Mapping):
+        return
+
+    for key, value in section.items():
+        if key in {"profiles", "profile"}:
+            continue
+        merged[key] = value
+
+    profile_name = section.get("profile")
+    profiles = section.get("profiles")
+    if isinstance(profile_name, str) and isinstance(profiles, Mapping):
+        selected = profiles.get(profile_name)
+        if isinstance(selected, Mapping):
+            merged.update(selected)
+
+
 def resolve_operator_config(operator: str, operator_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """Merge common and operator-specific YAML config for neural operators."""
     merged: Dict[str, Any] = {}
@@ -276,14 +344,12 @@ def resolve_operator_config(operator: str, operator_config: Optional[Mapping[str
         return merged
 
     common = operator_config.get("common")
-    if isinstance(common, Mapping):
-        merged.update(common)
+    _merge_operator_section(merged, common)
 
     specific = operator_config.get(operator)
     if not isinstance(specific, Mapping) and operator == "itfno":
         specific = operator_config.get("tfno")
-    if isinstance(specific, Mapping):
-        merged.update(specific)
+    _merge_operator_section(merged, specific)
 
     return merged
 
@@ -297,7 +363,7 @@ def build_fno_like_model(
     config: Dict[str, Any],
     n_modes_override: Optional[Sequence[int]] = None,
 ) -> nn.Module:
-    """Construct a TFNO/ITFNO/UNO/RNO model from merged config."""
+    """Construct a TFNO/ITFNO/UNO/RNO/WNO model from merged config."""
     require_neuralop(operator)
 
     modes_x, modes_y = _resolve_modes_2d(config.get("n_modes"), nx=nx, ny=ny, default=20)
@@ -317,7 +383,7 @@ def build_fno_like_model(
     channel_mlp_expansion = float(config.get("channel_mlp_expansion", 0.5))
     channel_mlp_skip = str(config.get("channel_mlp_skip", "soft-gating"))
     fno_skip = str(config.get("fno_skip", "linear"))
-    use_channel_mlp = bool(config.get("use_channel_mlp", True))
+    use_channel_mlp = bool(config.get("use_channel_mlp", False if operator == "wno" else True))
     lifting_ratio = float(config.get("lifting_channel_ratio", 2.0))
     projection_ratio = float(config.get("projection_channel_ratio", 2.0))
     lifting_channels = _normalize_optional_name(config.get("lifting_channels"))
@@ -506,5 +572,52 @@ def build_fno_like_model(
             projection_channels=projection_channels,
         )
         return _instantiate_with_unexpected_kwarg_retry(RNO, _filtered_ctor_kwargs(RNO, rno_kwargs))
+
+    if operator == "wno":
+        raw_base_resolution = _normalize_optional_name(config.get("base_resolution"))
+        if isinstance(raw_base_resolution, (list, tuple)):
+            base_resolution = [int(v) for v in raw_base_resolution]
+        else:
+            base_resolution = None
+
+        wno_kwargs: Dict[str, Any] = dict(
+            n_modes=n_modes,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            hidden_channels=hidden_channels,
+            n_layers=max(1, int(config.get("n_layers", 4))),
+            blocks=_normalize_optional_name(config.get("blocks")),
+            positional_embedding=str(config.get("positional_embedding", "grid")),
+            norm=norm,
+            fno_skip=fno_skip,
+            domain_padding=domain_padding,
+            separable=separable,
+            factorization=factorization,
+            rank=float(config.get("rank", 1.0)),
+            implementation=implementation,
+            wavelet=str(config.get("wavelet", "db4")),
+            wavelet_levels=max(1, int(config.get("wavelet_levels", 2))),
+            wavelet_mode=str(config.get("wavelet_mode", "symmetric")),
+            wavelet_transform=str(config.get("wavelet_transform", "dwt")),
+            base_resolution=base_resolution,
+        )
+        wno_kwargs = _add_channel_mlp_kwargs(
+            WNO,
+            wno_kwargs,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
+            channel_mlp_skip=channel_mlp_skip,
+        )
+        wno_kwargs = _add_channel_config_kwargs(
+            WNO,
+            wno_kwargs,
+            hidden_channels=hidden_channels,
+            lifting_ratio=lifting_ratio,
+            projection_ratio=projection_ratio,
+            lifting_channels=lifting_channels,
+            projection_channels=projection_channels,
+        )
+        return _instantiate_with_unexpected_kwarg_retry(WNO, _filtered_ctor_kwargs(WNO, wno_kwargs))
 
     raise ValueError(f"Unsupported neural operator type '{operator}'.")
