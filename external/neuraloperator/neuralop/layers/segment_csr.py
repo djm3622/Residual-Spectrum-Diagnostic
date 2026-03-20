@@ -48,7 +48,7 @@ def segment_csr(
 
     if importlib.util.find_spec("torch_scatter") is not None and use_scatter:
         """only import torch_scatter when cuda is available"""
-        import torch_scatter.segment_csr as scatter_segment_csr
+        import torch_scatter.segment_csr as scatter_segment_csr # pyright: ignore[reportMissingImports]
 
         return scatter_segment_csr(src, indptr, reduce=reduction)
 
