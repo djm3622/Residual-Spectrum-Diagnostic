@@ -44,7 +44,10 @@ except Exception:  # pragma: no cover - optional dependency path
 try:
     from neuralop.models import WNO
 except Exception:  # pragma: no cover - optional dependency path
-    WNO = None  # type: ignore[assignment]
+    try:
+        from neuralop.models.wno import WNO  # type: ignore[no-redef]
+    except Exception:  # pragma: no cover - optional dependency path
+        WNO = None  # type: ignore[assignment]
 
 
 def neuralop_runtime_info() -> Dict[str, Any]:
@@ -75,7 +78,8 @@ def require_neuralop(operator: str) -> None:
             )
             raise ImportError(f"{message}. Import error: {_NEURALOP_IMPORT_ERROR}") from _NEURALOP_IMPORT_ERROR
         raise ImportError(
-            "Method 'wno' requires a neuraloperator build that exports neuralop.models.WNO."
+            "Method 'wno' requires a neuraloperator build with WNO support "
+            "(expected neuralop.models.WNO or neuralop.models.wno.WNO)."
         )
 
     if normalized == "rno":
