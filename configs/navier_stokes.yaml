@@ -121,32 +121,32 @@ training:
         target_mode: next_block
         n_modes_time: 10
     uno:
-      hidden_channels: 32
+      hidden_channels: 48
       n_layers: 4
-      lifting_channels: 192
-      projection_channels: 192
+      lifting_channels: 64
+      projection_channels: 64
       channel_mlp_skip: linear
       temporal:
         enabled: true
-        input_steps: 10
-        output_steps: 10
+        input_steps: 20
+        output_steps: 20
         target_mode: next_block
-        n_modes_time: 4
+        n_modes_time: 10
       uno_out_channels:
-      - 72
-      - 96
-      - 96
-      - 72
+      - 48
+      - 64
+      - 64
+      - 48
       uno_n_modes:
       - - 4
         - 12
         - 12
-      - - 4
-        - 12
-        - 12
-      - - 4
-        - 12
-        - 12
+      - - 10
+        - 32
+        - 32
+      - - 10
+        - 32
+        - 32
       - - 4
         - 12
         - 12
