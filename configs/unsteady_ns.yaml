@@ -220,17 +220,18 @@ training:
       dropout: 0.0
       temporal:
         enabled: true
-        input_steps: 20
-        output_steps: 20
+        input_steps: 10
+        output_steps: 10
         target_mode: next_block
     conv:
-      model_width: 64
+      width: 48
       model_depth: 4
     swin:
       pretrained: false
       freeze_backbone: false
       decoder_channels:
       - 128
+      - 64
       - 64
       - 32
       - 32

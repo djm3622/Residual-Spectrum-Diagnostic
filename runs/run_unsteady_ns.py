@@ -3,6 +3,8 @@
 
 Usage:
     python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml wno 1 --device auto --loss l2 --basis fourier
+    python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml swin 1 --device auto --loss l2 --basis fourier
+    python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml attn_unet 1 --device auto --loss l2 --basis fourier
 """
 
 from __future__ import annotations

@@ -223,6 +223,7 @@ training:
       decoder_channels:
       - 128
       - 64
+      - 64
       - 32
       - 32
       use_attention: true

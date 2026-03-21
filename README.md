@@ -42,8 +42,11 @@ python3 runs/run_navier_stokes.py configs/navier_stokes.yaml uno 1 --device cuda
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml wno 1 --device cuda
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml rno 1 --device cuda
 python3 runs/run_navier_stokes.py configs/navier_stokes.yaml swin 1 --device cuda
+python3 runs/run_navier_stokes.py configs/navier_stokes.yaml attn_unet 1 --device cuda
 python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml tfno 1 --device cuda
 python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml wno 1 --device cuda
+python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml swin 1 --device cuda
+python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml attn_unet 1 --device cuda
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml tfno 7 --device mps
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml itfno 7 --device mps
 python3 runs/run_reaction_diffusion.py configs/reaction_diffusion.yaml uno 7 --device mps
@@ -141,12 +144,15 @@ Train + eval (single command; eval is integrated into the run):
 
 ```bash
 python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml tfno 1 --device cuda
+python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml wno 1 --device cuda
+python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml swin 1 --device cuda
+python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml attn_unet 1 --device cuda
 ```
 
 Equivalent eval command:
 
 ```bash
-python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml tfno 1 --device cuda
+python3 runs/run_unsteady_ns.py configs/unsteady_ns.yaml wno 1 --device cuda
 ```
 
 Expected output paths:

@@ -181,7 +181,7 @@ training:
             enabled: false
         ns3d:
           n_modes:
-          - 8
+          - 10
           - 32
           - 32
           blocks: 4
@@ -214,11 +214,13 @@ training:
         target_mode: next_block
     conv:
       width: 48
+      model_depth: 4
     swin:
       pretrained: false
       freeze_backbone: false
       decoder_channels:
       - 128
+      - 64
       - 64
       - 32
       - 32
