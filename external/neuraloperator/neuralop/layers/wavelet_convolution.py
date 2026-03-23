@@ -426,6 +426,15 @@ class WaveletConv3d(_WaveletConvBase):
         self.weights6 = nn.Parameter(scale * torch.rand(in_channels, out_channels, m1, m2, m3))
         self.weights7 = nn.Parameter(scale * torch.rand(in_channels, out_channels, m1, m2, m3))
         self.weights8 = nn.Parameter(scale * torch.rand(in_channels, out_channels, m1, m2, m3))
+        self._detail_weights = (
+            self.weights2,
+            self.weights3,
+            self.weights4,
+            self.weights5,
+            self.weights6,
+            self.weights7,
+            self.weights8,
+        )
 
     def _mul3d(self, x, weight):
         if x.ndim == 4:
@@ -473,6 +482,43 @@ class WaveletConv3d(_WaveletConvBase):
             )
         return out
 
+    def _apply_detail_weights_3d(self, detail_coeffs):
+        # ptwt exposes details as a dict of 7 sub-bands; stack to apply all bands in one einsum.
+        bands = [detail_coeffs[key] for key in self._detail_keys]
+        first = bands[0]
+        if first.ndim != 5:
+            # Fallback to per-band path for unexpected layouts.
+            for key, weight in zip(self._detail_keys, self._detail_weights):
+                detail_coeffs[key] = self._apply_weight_3d(detail_coeffs[key], weight)
+            return detail_coeffs
+
+        band_tensor = torch.stack(bands, dim=1)  # [B, K=7, C_in, D, H, W]
+        weight_tensor = torch.stack(self._detail_weights, dim=0)  # [K=7, C_in, C_out, m1, m2, m3]
+
+        out = torch.zeros(
+            band_tensor.shape[0],
+            band_tensor.shape[1],
+            self.out_channels,
+            band_tensor.shape[-3],
+            band_tensor.shape[-2],
+            band_tensor.shape[-1],
+            device=band_tensor.device,
+            dtype=band_tensor.dtype,
+        )
+
+        m1 = min(band_tensor.shape[-3], weight_tensor.shape[-3], self.n_modes[0])
+        m2 = min(band_tensor.shape[-2], weight_tensor.shape[-2], self.n_modes[1])
+        m3 = min(band_tensor.shape[-1], weight_tensor.shape[-1], self.n_modes[2])
+        out[:, :, :, :m1, :m2, :m3] = torch.einsum(
+            "bkixyz,kioxyz->bkoxyz",
+            band_tensor[:, :, :, :m1, :m2, :m3],
+            weight_tensor[:, :, :, :m1, :m2, :m3],
+        )
+
+        for i, key in enumerate(self._detail_keys):
+            detail_coeffs[key] = out[:, i]
+        return detail_coeffs
+
     def forward(self, x: torch.Tensor, output_shape: Optional[Tuple[int, int, int]] = None):
         if x.ndim != 5:
             raise ValueError(
@@ -482,22 +528,10 @@ class WaveletConv3d(_WaveletConvBase):
         level_offset = self._effective_levels(tuple(x.shape[-3:]), self.base_resolution)
         levels = self.wavelet_levels if level_offset is None else max(1, self.wavelet_levels + level_offset)
 
-        detail_weights = (
-            self.weights2,
-            self.weights3,
-            self.weights4,
-            self.weights5,
-            self.weights6,
-            self.weights7,
-            self.weights8,
-        )
-
         coeffs = list(self._wavedec3(x, self._wavelet_obj, level=levels, mode=self.wavelet_mode))
         coeffs[0] = self._apply_weight_3d(coeffs[0], self.weights1)
-        for key, weight in zip(self._detail_keys, detail_weights):
-            coeffs[1][key] = self._apply_weight_3d(coeffs[1][key], weight)
-        for j in range(2, len(coeffs)):
-            coeffs[j] = {k: torch.zeros_like(v) for k, v in coeffs[j].items()}
+        coeffs[1] = self._apply_detail_weights_3d(coeffs[1])
+        coeffs[2:] = [{k: torch.zeros_like(v) for k, v in level.items()} for level in coeffs[2:]]
 
         xr = self._waverec3(coeffs, self._wavelet_obj)
 

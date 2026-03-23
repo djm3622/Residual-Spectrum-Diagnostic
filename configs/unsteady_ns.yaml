@@ -177,7 +177,7 @@ training:
     wno:
       # ns2d -> 2D one-step WNO, ns3d -> temporal next-block WNO (T x H x W operator).
       profile: ns3d
-      wavelet: db4
+      wavelet: haar
       wavelet_transform: dwt
       use_channel_mlp: false
       hidden_channels: 32
@@ -194,8 +194,8 @@ training:
         ns3d:
           n_modes:
           - 5
-          - 20
-          - 20
+          - 32
+          - 32
           blocks: 3
           wavelet_levels: 1
           wavelet_mode: periodic
