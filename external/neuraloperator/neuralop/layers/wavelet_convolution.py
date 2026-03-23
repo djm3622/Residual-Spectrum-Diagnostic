@@ -428,7 +428,11 @@ class WaveletConv3d(_WaveletConvBase):
         self.weights8 = nn.Parameter(scale * torch.rand(in_channels, out_channels, m1, m2, m3))
 
     def _mul3d(self, x, weight):
-        return torch.einsum("ixyz,ioxyz->oxyz", x, weight)
+        if x.ndim == 4:
+            return torch.einsum("ixyz,ioxyz->oxyz", x, weight)
+        if x.ndim == 5:
+            return torch.einsum("bixyz,ioxyz->boxyz", x, weight)
+        raise ValueError(f"Expected 4D or 5D coeff tensor, got shape {tuple(x.shape)}")
 
     def _active_modes(self, coeff_shape, weight_shape):
         m1 = min(coeff_shape[-3], weight_shape[-3], self.n_modes[0])
@@ -437,18 +441,36 @@ class WaveletConv3d(_WaveletConvBase):
         return m1, m2, m3
 
     def _apply_weight_3d(self, coeff, weight):
-        out = torch.zeros(
-            self.out_channels,
-            coeff.shape[-3],
-            coeff.shape[-2],
-            coeff.shape[-1],
-            device=coeff.device,
-            dtype=coeff.dtype,
-        )
+        if coeff.ndim == 4:
+            out = torch.zeros(
+                self.out_channels,
+                coeff.shape[-3],
+                coeff.shape[-2],
+                coeff.shape[-1],
+                device=coeff.device,
+                dtype=coeff.dtype,
+            )
+        elif coeff.ndim == 5:
+            out = torch.zeros(
+                coeff.shape[0],
+                self.out_channels,
+                coeff.shape[-3],
+                coeff.shape[-2],
+                coeff.shape[-1],
+                device=coeff.device,
+                dtype=coeff.dtype,
+            )
+        else:
+            raise ValueError(f"Expected 4D or 5D coeff tensor, got shape {tuple(coeff.shape)}")
         m1, m2, m3 = self._active_modes(coeff.shape, weight.shape)
-        out[:, :m1, :m2, :m3] = self._mul3d(
-            coeff[:, :m1, :m2, :m3], weight[:, :, :m1, :m2, :m3]
-        )
+        if coeff.ndim == 4:
+            out[:, :m1, :m2, :m3] = self._mul3d(
+                coeff[:, :m1, :m2, :m3], weight[:, :, :m1, :m2, :m3]
+            )
+        else:
+            out[:, :, :m1, :m2, :m3] = self._mul3d(
+                coeff[:, :, :m1, :m2, :m3], weight[:, :, :m1, :m2, :m3]
+            )
         return out
 
     def forward(self, x: torch.Tensor, output_shape: Optional[Tuple[int, int, int]] = None):
@@ -460,11 +482,6 @@ class WaveletConv3d(_WaveletConvBase):
         level_offset = self._effective_levels(tuple(x.shape[-3:]), self.base_resolution)
         levels = self.wavelet_levels if level_offset is None else max(1, self.wavelet_levels + level_offset)
 
-        xr = torch.zeros(
-            (x.shape[0], self.out_channels, x.shape[2], x.shape[3], x.shape[4]),
-            device=x.device,
-            dtype=x.dtype,
-        )
         detail_weights = (
             self.weights2,
             self.weights3,
@@ -475,21 +492,14 @@ class WaveletConv3d(_WaveletConvBase):
             self.weights8,
         )
 
-        for b in range(x.shape[0]):
-            coeffs = list(
-                self._wavedec3(
-                x[b, ...], self._wavelet_obj, level=levels, mode=self.wavelet_mode
-                )
-            )
+        coeffs = list(self._wavedec3(x, self._wavelet_obj, level=levels, mode=self.wavelet_mode))
+        coeffs[0] = self._apply_weight_3d(coeffs[0], self.weights1)
+        for key, weight in zip(self._detail_keys, detail_weights):
+            coeffs[1][key] = self._apply_weight_3d(coeffs[1][key], weight)
+        for j in range(2, len(coeffs)):
+            coeffs[j] = {k: torch.zeros_like(v) for k, v in coeffs[j].items()}
 
-            coeffs[0] = self._apply_weight_3d(coeffs[0], self.weights1)
-            for key, weight in zip(self._detail_keys, detail_weights):
-                coeffs[1][key] = self._apply_weight_3d(coeffs[1][key], weight)
-
-            for j in range(2, len(coeffs)):
-                coeffs[j] = {k: torch.zeros_like(v) for k, v in coeffs[j].items()}
-
-            xr[b, ...] = self._waverec3(coeffs, self._wavelet_obj)
+        xr = self._waverec3(coeffs, self._wavelet_obj)
 
         xr = self._apply_bias(xr)
 
