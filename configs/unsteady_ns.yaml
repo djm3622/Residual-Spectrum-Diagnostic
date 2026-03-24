@@ -180,14 +180,14 @@ training:
       wavelet: haar
       wavelet_transform: dwt
       use_channel_mlp: false
-      hidden_channels: 32
+      hidden_channels: 48
       profiles:
         ns2d:
           n_modes:
           - 32
           - 32
           blocks: 4
-          wavelet_levels: 2
+          wavelet_levels: 3
           wavelet_mode: symmetric
           temporal:
             enabled: false
@@ -196,8 +196,8 @@ training:
           - 5
           - 32
           - 32
-          blocks: 3
-          wavelet_levels: 1
+          blocks: 4
+          wavelet_levels: 5
           wavelet_mode: periodic
           temporal:
             enabled: true
