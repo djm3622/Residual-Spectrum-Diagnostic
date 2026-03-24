@@ -63,7 +63,9 @@ training:
   one_cycle_pct_start: 0.3
   one_cycle_div_factor: 25.0
   one_cycle_final_div_factor: 10000.0
-  checkpoint_every_epochs: 301
+  dataloader_num_workers: 4
+  checkpoint_every_epochs: 0
+  save_final_checkpoint: false
   early_stopping_patience: -1
   n_iter: 300
   batch_size: 32

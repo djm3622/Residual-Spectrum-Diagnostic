@@ -69,7 +69,11 @@ class PhysicsConsistentSurrogate2DCoupled:
         val_targets_u: List[np.ndarray] | None = None,
         val_targets_v: List[np.ndarray] | None = None,
         pair_steps: List[int] | None = None,
-        checkpoint_callback: Callable[[int, float, Dict[str, Any]], None] | None = None,
+        checkpoint_callback: (
+            Callable[[int, float], None]
+            | Callable[[int, float, Dict[str, Any]], None]
+            | None
+        ) = None,
         early_stopping_patience: int | None = None,
         resume_state: Dict[str, Any] | None = None,
         train_dataset: Any | None = None,

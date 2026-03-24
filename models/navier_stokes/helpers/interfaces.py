@@ -33,7 +33,11 @@ class OneStepModel(Protocol):
         rollout_weight: float = 0.0,
         val_inputs: List[np.ndarray] | None = None,
         val_targets: List[np.ndarray] | None = None,
-        checkpoint_callback: Callable[[int, float, Dict[str, Any]], None] | None = None,
+        checkpoint_callback: (
+            Callable[[int, float], None]
+            | Callable[[int, float, Dict[str, Any]], None]
+            | None
+        ) = None,
         early_stopping_patience: int | None = None,
         resume_state: Dict[str, Any] | None = None,
         train_dataset: Dataset[tuple[torch.Tensor, torch.Tensor]] | None = None,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import inspect
 from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 import numpy as np
@@ -201,7 +202,11 @@ class ConvolutionalSurrogate2D:
         rollout_weight: float = 0.0,
         val_inputs: List[np.ndarray] | None = None,
         val_targets: List[np.ndarray] | None = None,
-        checkpoint_callback: Callable[[int, float, Dict[str, Any]], None] | None = None,
+        checkpoint_callback: (
+            Callable[[int, float, Dict[str, Any]], None]
+            | Callable[[int, float], None]
+            | None
+        ) = None,
         early_stopping_patience: int | None = None,
         resume_state: Dict[str, Any] | None = None,
         train_dataset: Dataset[Tuple[torch.Tensor, torch.Tensor]] | None = None,
@@ -237,7 +242,11 @@ def _train_convolutional_surrogate_2d(
     rollout_weight: float = 0.0,
     val_inputs: List[np.ndarray] | None = None,
     val_targets: List[np.ndarray] | None = None,
-    checkpoint_callback: Callable[[int, float, Dict[str, Any]], None] | None = None,
+    checkpoint_callback: (
+        Callable[[int, float, Dict[str, Any]], None]
+        | Callable[[int, float], None]
+        | None
+    ) = None,
     early_stopping_patience: int | None = None,
     resume_state: Dict[str, Any] | None = None,
     train_dataset: Dataset[Tuple[torch.Tensor, torch.Tensor]] | None = None,
@@ -281,8 +290,13 @@ def _train_convolutional_surrogate_2d(
         loader_kwargs["prefetch_factor"] = 2
     train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
     has_val = val_dataset is not None and len(val_dataset) > 0
+    aux_loader_kwargs: Dict[str, Any] = {
+        "batch_size": batch,
+        "num_workers": 0,
+        "pin_memory": pin_memory,
+    }
     if has_val and val_dataset is not None:
-        val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
+        val_loader = DataLoader(val_dataset, shuffle=False, **aux_loader_kwargs)
     else:
         val_loader = None
 
@@ -418,6 +432,12 @@ def _train_convolutional_surrogate_2d(
         elif np.isfinite(best_val_loss):
             best_state = clone_state_dict(self.net.state_dict())
         start_epoch = max(1, int(resume_state.get("epoch", 0)) + 1)
+    checkpoint_callback_arity = 0
+    if checkpoint_callback is not None:
+        try:
+            checkpoint_callback_arity = len(inspect.signature(checkpoint_callback).parameters)
+        except (TypeError, ValueError):
+            checkpoint_callback_arity = 3
 
     def _capture_training_state(epoch_idx: int, val_loss_value: float) -> Dict[str, Any]:
         cuda_rng_state = None
@@ -544,9 +564,12 @@ def _train_convolutional_surrogate_2d(
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
-        training_state = _capture_training_state(epoch_idx, float(val_loss_value))
         if checkpoint_callback is not None:
-            checkpoint_callback(epoch_idx, float(val_loss_value), training_state)
+            if checkpoint_callback_arity >= 3:
+                training_state = _capture_training_state(epoch_idx, float(val_loss_value))
+                checkpoint_callback(epoch_idx, float(val_loss_value), training_state)
+            else:
+                checkpoint_callback(epoch_idx, float(val_loss_value))
         if patience is not None and has_val and epochs_without_improvement >= patience:
             break
     if best_state is not None:

@@ -129,22 +129,31 @@ def run_single_seed(
     normalized_method = str(method).strip().lower().replace("-", "_")
     is_rno_method = normalized_method in {"rno", "neuralop_rno", "operator_rno"}
     dataloader_workers = _resolve_dataloader_num_workers(config.train_dataloader_num_workers)
-    checkpoint_interval = max(1, int(checkpoint_every_epochs))
+    checkpoint_interval = int(checkpoint_every_epochs)
+    save_epoch_checkpoints = checkpoint_interval > 0
     resolved_checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir is not None else None
     best_val_tracker: Dict[str, float] = {
         "clean": float("inf"),
         "noisy": float("inf"),
     }
-    latest_training_state: Dict[str, Dict[str, Any] | None] = {
-        "clean": None,
-        "noisy": None,
-    }
+
+    def _extract_model_state(model_obj: Any) -> Dict[str, Any]:
+        net = getattr(model_obj, "net", None)
+        if net is not None and hasattr(net, "state_dict"):
+            state = net.state_dict()
+            if isinstance(state, dict):
+                return state
+        if hasattr(model_obj, "state_dict"):
+            state = model_obj.state_dict()
+            if isinstance(state, dict):
+                return state
+        return {}
 
     def _build_checkpoint_payload(
         model_tag: str,
         epoch: int,
         val_loss: float,
-        training_state: Dict[str, Any],
+        model_state: Dict[str, Any],
         model_architecture: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any]:
         payload = {
@@ -152,7 +161,7 @@ def run_single_seed(
             "phase": str(model_tag),
             "epoch": int(epoch),
             "val_loss": float(val_loss) if np.isfinite(val_loss) else float("nan"),
-            "training_state": training_state,
+            "training_state": {"model_state": model_state},
         }
         if isinstance(model_architecture, Mapping):
             payload["model_architecture"] = dict(model_architecture)
@@ -162,23 +171,20 @@ def run_single_seed(
         model_tag: str,
         epoch: int,
         val_loss: float,
-        training_state: Dict[str, Any],
+        model_obj: Any,
         model_architecture: Mapping[str, Any] | None = None,
     ) -> None:
+        if resolved_checkpoint_dir is None:
+            return
         payload = _build_checkpoint_payload(
             model_tag,
             epoch,
             val_loss,
-            training_state,
+            _extract_model_state(model_obj),
             model_architecture=model_architecture,
         )
-        latest_training_state[model_tag] = payload
-        if resolved_checkpoint_dir is None:
-            return
         epoch_idx = int(epoch)
-        if epoch_idx % checkpoint_interval != 0:
-            pass
-        else:
+        if save_epoch_checkpoints and (epoch_idx % checkpoint_interval == 0):
             save_checkpoint(
                 resolved_checkpoint_dir / f"model_{model_tag}_epoch_{epoch_idx:04d}.npz",
                 payload,
@@ -282,12 +288,12 @@ def run_single_seed(
         if hasattr(model_clean, "describe_architecture")
         else {"surrogate_class": model_clean.__class__.__name__}
     )
-    def _clean_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
+    def _clean_checkpoint_callback(epoch: int, val_loss: float) -> None:
         _save_checkpoint_event(
             "clean",
             epoch,
             val_loss,
-            training_state,
+            model_clean,
             model_architecture=clean_architecture,
         )
 
@@ -342,19 +348,14 @@ def run_single_seed(
         show_progress=show_training_progress,
         progress_desc="Training clean model",
     )
-    if resolved_checkpoint_dir is not None:
-        clean_payload = latest_training_state.get("clean")
-        if clean_payload is None:
-            clean_payload = {
-                "format": "training_state_v1",
-                "phase": "clean",
-                "epoch": int(config.train_iterations),
-                "val_loss": float("nan"),
-                "training_state": {"model_state": model_clean.state_dict()},
-                "model_architecture": clean_architecture,
-            }
-        else:
-            clean_payload = dict(clean_payload)
+    if resolved_checkpoint_dir is not None and bool(config.train_save_final_checkpoint):
+        clean_payload = _build_checkpoint_payload(
+            "clean",
+            int(config.train_iterations),
+            float("nan"),
+            _extract_model_state(model_clean),
+            model_architecture=clean_architecture,
+        )
         clean_payload["is_final"] = True
         save_checkpoint(resolved_checkpoint_dir / "model_clean.npz", clean_payload)
     if str(device).lower() == "cuda":
@@ -433,12 +434,12 @@ def run_single_seed(
         if hasattr(model_noisy, "describe_architecture")
         else {"surrogate_class": model_noisy.__class__.__name__}
     )
-    def _noisy_checkpoint_callback(epoch: int, val_loss: float, training_state: Dict[str, Any]) -> None:
+    def _noisy_checkpoint_callback(epoch: int, val_loss: float) -> None:
         _save_checkpoint_event(
             "noisy",
             epoch,
             val_loss,
-            training_state,
+            model_noisy,
             model_architecture=noisy_architecture,
         )
 
@@ -493,19 +494,14 @@ def run_single_seed(
         show_progress=show_training_progress,
         progress_desc="Training noisy model",
     )
-    if resolved_checkpoint_dir is not None:
-        noisy_payload = latest_training_state.get("noisy")
-        if noisy_payload is None:
-            noisy_payload = {
-                "format": "training_state_v1",
-                "phase": "noisy",
-                "epoch": int(config.train_iterations),
-                "val_loss": float("nan"),
-                "training_state": {"model_state": model_noisy.state_dict()},
-                "model_architecture": noisy_architecture,
-            }
-        else:
-            noisy_payload = dict(noisy_payload)
+    if resolved_checkpoint_dir is not None and bool(config.train_save_final_checkpoint):
+        noisy_payload = _build_checkpoint_payload(
+            "noisy",
+            int(config.train_iterations),
+            float("nan"),
+            _extract_model_state(model_noisy),
+            model_architecture=noisy_architecture,
+        )
         noisy_payload["is_final"] = True
         save_checkpoint(resolved_checkpoint_dir / "model_noisy.npz", noisy_payload)
     if str(device).lower() == "cuda":
