@@ -197,7 +197,7 @@ training:
           - 32
           - 32
           blocks: 4
-          wavelet_levels: 5
+          wavelet_levels: 3
           wavelet_mode: periodic
           temporal:
             enabled: true
